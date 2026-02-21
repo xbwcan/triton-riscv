@@ -335,11 +335,17 @@ def compile_module(launcher_src, kernel_placeholder_name):
                       
                       subprocess.check_call(subprocess_args)
                   else:
-                      subprocess.check_call([
+                      link_args = [
                         "g++", "-std=c++17", launcher_src_path, obj_path,
                         f"-I{py_include_dir}", f"-I{include_dir}", f"-L{py_lib_dir}",
                         "-shared", f"-l{py_lib}", "-fPIC", "-o", so_path
-                      ])
+                      ]
+                      # libgcc_s provides soft-float runtime helpers (e.g. __extendhfsf2
+                      # for fp16->fp32 conversion) needed when hardware fp16 is unavailable.
+                      # Without this, loading the .so fails with "undefined symbol" errors.
+                      if platform.system() == "Linux":
+                          link_args.append("-lgcc_s")
+                      subprocess.check_call(link_args)
 
               with open(so_path, "rb") as f:
                 cache_path = cache.put(f.read(), filename, binary=True)
