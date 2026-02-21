@@ -432,7 +432,7 @@ index 00033c0fc..0a0677ea8 100644
    py::class_<ttg::WarpSpecializeOp, OpState>(m, "WarpSpecializeOp",
                                               py::module_local())
 diff --git a/setup.py b/setup.py
-index dffc45ab1..a45baa064 100644
+index dffc45ab1..9c9052dff 100644
 --- a/setup.py
 +++ b/setup.py
 @@ -401,7 +401,8 @@ class CMakeBuild(build_ext):
@@ -445,18 +445,20 @@ index dffc45ab1..a45baa064 100644
  
          try:
              out = subprocess.check_output(["cmake", "--version"])
-@@ -461,7 +462,9 @@ class CMakeBuild(build_ext):
+@@ -461,7 +462,11 @@ class CMakeBuild(build_ext):
              "-DPython3_EXECUTABLE:FILEPATH=" + sys.executable, "-DPython3_INCLUDE_DIR=" + python_include_dir,
              "-DTRITON_CODEGEN_BACKENDS=" + ';'.join([b.name for b in backends if not b.is_external]),
              "-DTRITON_PLUGIN_DIRS=" + ';'.join([b.src_dir for b in backends if b.is_external]),
 -            "-DTRITON_WHEEL_DIR=" + wheeldir
 +            "-DTRITON_WHEEL_DIR=" + wheeldir,
-+            # Unit tests hard-code links to NV/AMD libs; disable when no GPU backends are active.
++            # Unit tests and Proton profiler require CUPTI/ROCtracer headers that
++            # are only present when a GPU backend is active.
 +            "-DTRITON_BUILD_UT=" + ("ON" if any(not b.is_external for b in backends) else "OFF"),
++            "-DTRITON_BUILD_PROTON=" + ("ON" if any(not b.is_external for b in backends) else "OFF"),
          ]
          if lit_dir is not None:
              cmake_args.append("-DLLVM_EXTERNAL_LIT=" + lit_dir)
-@@ -603,8 +606,8 @@ def download_and_copy_dependencies():
+@@ -603,8 +608,8 @@ def download_and_copy_dependencies():
      )
  
  
