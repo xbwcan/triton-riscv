@@ -137,14 +137,16 @@ export LLVM_BINARY_DIR=/path/to/llvm/build/bin   # e.g. /home/user/buddy-mlir/ll
 **Step 5 – run the example test suite**
 
 ```sh
-cd ..   # back to the directory that contains triton_shared/
-pytest triton_shared/python/examples -x -v
+pytest ../triton-riscv/python/examples/ \
+    --ignore=../triton-riscv/python/examples/test_core.py \
+    --ignore=../triton-riscv/python/examples/test_annotations.py \
+    -v
 ```
 
 To run a single test quickly:
 
 ```sh
-pytest triton_shared/python/examples/test_vec_add.py -v
+pytest ../triton-riscv/python/examples/test_vec_add.py -v
 ```
 
 ---
