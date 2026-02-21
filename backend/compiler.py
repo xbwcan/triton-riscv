@@ -176,7 +176,7 @@ def _llir_to_bin(llir: str, metadata):
             # Without explicitly enabling +f,+d, llc defaults to soft-float, causing
             # "can't link soft-float modules with double-float modules" linker errors.
             if platform.machine() == "riscv64":
-                llc_args.extend(["-mattr=+m,+a,+f,+d,+c,+v"])
+                llc_args.extend(["-mattr=+m,+a,+f,+d,+c,+v,+zfh,+zvfh,+zba,+zbb"])
             subprocess.check_call(llc_args)
         
         return Path(dst_path).read_bytes()
