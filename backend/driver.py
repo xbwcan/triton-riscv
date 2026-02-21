@@ -338,13 +338,15 @@ def compile_module(launcher_src, kernel_placeholder_name):
                       link_args = [
                         "g++", "-std=c++17", launcher_src_path, obj_path,
                         f"-I{py_include_dir}", f"-I{include_dir}", f"-L{py_lib_dir}",
-                        "-shared", f"-l{py_lib}", "-fPIC", "-o", so_path
+                        "-shared", f"-l{py_lib}", "-fPIC",
                       ]
-                      # libgcc_s provides soft-float runtime helpers (e.g. __extendhfsf2
-                      # for fp16->fp32 conversion) needed when hardware fp16 is unavailable.
-                      # Without this, loading the .so fails with "undefined symbol" errors.
+                      # Statically embed libgcc runtime helpers (e.g. __extendhfsf2 for
+                      # fp16->fp32 conversion) into the .so. Using -lgcc_s (dynamic) fails
+                      # because libgcc_s.so.1 is not loaded in Python's process at dlopen
+                      # time, causing "undefined symbol" errors for soft-float ABI helpers.
                       if platform.system() == "Linux":
-                          link_args.append("-lgcc_s")
+                          link_args.append("-static-libgcc")
+                      link_args.extend(["-o", so_path])
                       subprocess.check_call(link_args)
 
               with open(so_path, "rb") as f:
