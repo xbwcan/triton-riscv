@@ -1,140 +1,108 @@
-**This repository is no longer maintained.**
-It remains available for reference.
-For continued development, please consider forking the repository.
+# triton-riscv
 
-# triton-shared
+Triton compiler for RISC-V platforms.
 
-A shared middle-layer for the Triton Compiler.
+This repository is forked from [triton-shared](https://github.com/triton-lang/triton-shared) and provides a Triton compiler backend for RISC-V. The upstream triton-shared repo is no longer maintained, so this project is developed independently under the name triton-riscv.
 
-Currently the middle layer is not complete but has enough functionality to demonstrate how it can work. The general idea is that Triton IR is lowered into an MLIR core dialect to allow it to be both shared across Triton targets as well as allow back-ends to be shared with other languages.
-
-The basic intended architecture looks like this:
-
-[Triton IR] -> [Middle Layer] -> [HW specific IR]
-
-The middle-layer uses MLIR's Linalg and Tensor Dialects for operations on Triton block values. Operations on Triton pointers use the Memref Dialect.
-
-## Motivation
-[This talk at the 2023 Triton Developer Conferene](https://www.youtube.com/watch?v=y2V3ucS1pfQ) gives some background on the project and its goals.
-
-## Usage
-
-This repo now includes `triton` as a submodule and builds as an out-of-tree backend.
-
-To build this repo clone `triton-shared` to a folder called `triton_shared` (notice the **underscore**).
-`Triton` will use this folder name to create a module under `triton.runtime` for the reference CPU backend.
-
-You need to set the `TRITON_PLUGIN_DIRS` environment variable to the location of your `triton-shared` directory for `triton` to find it.
-
-```
-export TRITON_PLUGIN_DIRS=$(pwd)/triton_shared
-
-git clone https://github.com/microsoft/triton-shared.git triton_shared
-git clone https://github.com/triton-lang/triton.git
-cd triton && git checkout $(cat ../triton_shared/triton-hash.txt)
-```
-
-To build with Clang:
-
-```sh
-python3 -m pip install --upgrade pip
-python3 -m pip install cmake==3.24 ninja pytest-xdist pybind11 setuptools
-sudo apt-get update -y
-sudo apt-get install -y ccache clang lld
-TRITON_BUILD_WITH_CLANG_LLD=true TRITON_BUILD_WITH_CCACHE=true python3 -m pip install --no-build-isolation -vvv '.[tests]'
-```
-
-To build with a virtualenv:
-
-```
-python3 -m venv .venv --prompt triton
-source .venv/bin/activate
-
-pip3 install ninja cmake wheel pytest pybind11 setuptools
-pip3 install -e . --no-build-isolation
-```
-
-The resulting `triton-shared` binaries will be placed under `triton/build/{current_cmake_version}/third_party/triton_shared`
-
-### CPU-only build (no NVIDIA / AMD backends)
-
-This configuration lets triton act purely as a frontend (Python AST → TTIR) while
-triton-shared handles all subsequent compilation stages (TTIR → Linalg → LLVM IR → native object).
-No NVIDIA or AMD toolchain is required.
+Triton acts as a frontend (Python AST → TTIR); triton-riscv handles the rest of the pipeline (TTIR → Linalg → LLVM IR → native object). No NVIDIA or AMD toolchain is required.
 
 **Compilation pipeline:**
+
 ```
 Python @triton.jit
   └─► TTIR          (triton: ast_to_ttir + make_ttir passes)
         └─► Linalg MLIR   (triton-shared-opt --triton-to-linalg-experimental)
-              └─► LLVM MLIR  (mlir-opt lowering passes)
+              └─► LLVM MLIR  (Buddy Compiler lowering passes)
                     └─► LLVM IR  (mlir-translate --mlir-to-llvmir)
                           └─► native .o  (llc -filetype=obj)
 ```
 
----
+## Clone
 
-**Step 1 – clone and pin triton to the tested commit**
+Set `TRITON_PLUGIN_DIRS` to your `triton-riscv` directory so that Triton can discover the plugin:
 
 ```sh
-git clone https://github.com/microsoft/triton-shared.git triton_shared
+export TRITON_PLUGIN_DIRS=$(pwd)/triton-riscv
+
+git clone https://github.com/RuyiAI-Stack/triton-riscv.git triton-riscv
 git clone https://github.com/triton-lang/triton.git
-cd triton && git checkout $(cat ../triton_shared/triton-hash.txt)
+cd triton && git checkout $(cat ../triton-riscv/triton-hash.txt)
 ```
 
-**Step 2 – apply the build-system patches**
-
-The patches live in `triton_shared/patches/` and are applied with the helper script.
-They make the NVIDIA/AMD LLVM codegen libraries conditional on the respective backends
-actually being enabled, so the build succeeds without any GPU toolchain.
+Apply the build-system patches from `triton-riscv/patches/` using the helper script. These patches make the NVIDIA/AMD LLVM codegen libraries conditional on their backends being enabled, so the build succeeds without any GPU toolchain.
 
 ```sh
-# from the directory that contains both repos
-triton_shared/scripts/apply_patches.sh triton
+cd triton
+/path/to/triton-riscv/scripts/apply_patches.sh ./
 ```
 
-The script is idempotent: running it again on an already-patched tree prints
-`SKIPPED (patch already applied)` for each patch and exits cleanly.
+The script is idempotent: re-running it on an already-patched tree prints `SKIPPED (patch already applied)` per patch and exits cleanly.
 
-**Step 3 – build**
+## Prerequisites
+
+### Create a virtual environment
+
+```sh
+# From the triton root directory
+python -m venv .venv --prompt triton-riscv
+source .venv/bin/activate
+```
+
+### Install dependencies
+
+1. Install the [dependencies](https://github.com/buddy-compiler/buddy-mlir?tab=readme-ov-file#llvmmlir-dependencies) required by the Ruyi Buddy Compiler.
+
+2. Install triton-riscv Python dependencies:
+
+   ```sh
+   pip install pytest-xdist pybind11 setuptools
+   ```
+
+3. Build the Buddy Compiler — [Getting started](https://github.com/buddy-compiler/buddy-mlir?tab=readme-ov-file#getting-started)
+
+## Build
 
 ```sh
 cd triton
 
-# Point triton's plugin discovery at triton_shared.
-export TRITON_PLUGIN_DIRS=/path/to/triton_shared
+# Point triton's plugin discovery at triton-riscv.
+export TRITON_PLUGIN_DIRS=/path/to/triton-riscv
 
-# (Optional) Use a custom LLVM build instead of the one triton downloads.
-# The build directory must contain lib/ and bin/ sub-directories.
-export LLVM_SYSPATH=/path/to/llvm/build   # e.g. /home/user/buddy-mlir/llvm/build
+# Use a custom LLVM build instead of the one triton downloads.
+export LLVM_SYSPATH=/path/to/buddy-mlir/llvm/build
 
-# Install (no GPU backends are compiled; triton_shared is the only backend).
+# Install.
 pip install --no-build-isolation -vvv .
 ```
 
 > **Tip – incremental rebuilds**: After the first full build you can skip the
-> slow cmake reconfigure by rebuilding directly in the cmake output directory:
+> slow CMake reconfigure by building directly in the CMake output directory:
 >
 > ```sh
 > BUILD_DIR=$(ls -d build/cmake.linux-*-cpython-*)
 > cmake --build $BUILD_DIR -j$(nproc)
 > # then re-install so the new .so is picked up by Python:
-> pip install --no-build-isolation -q .
+> pip install --no-build-isolation -vvv .
 > ```
 
-**Step 4 – set runtime environment variables**
+Build artifacts are placed under `triton/build/{current_cmake_version}/third_party/triton_shared`.
+
+## Set runtime environment variables
+
+Before running tests or Triton kernels, set these in your environment:
 
 ```sh
 # Path to the triton-shared-opt binary produced by the build.
 BUILD_DIR=$(ls -d build/cmake.linux-*-cpython-*)
 export TRITON_SHARED_OPT_PATH=$(pwd)/${BUILD_DIR}/third_party/triton_shared/tools/triton-shared-opt/triton-shared-opt
 
-# Directory that contains mlir-opt, mlir-translate, and llc.
-# When using a custom LLVM build point this at its bin/ directory.
-export LLVM_BINARY_DIR=/path/to/llvm/build/bin   # e.g. /home/user/buddy-mlir/llvm/build/bin
+# Directory containing mlir-opt, mlir-translate, and llc (e.g. your Buddy/LLVM build's bin/).
+export LLVM_BINARY_DIR=/path/to/buddy-mlir/llvm/build/bin
 ```
 
-**Step 5 – run the example test suite**
+## Run the example test suite
+
+Ensure PyTorch is available in your virtual environment; on RISC-V we recommend building PyTorch from source or cross-compiling it.
 
 ```sh
 pytest ../triton-riscv/python/examples/ \
@@ -143,190 +111,20 @@ pytest ../triton-riscv/python/examples/ \
     -v
 ```
 
-To run a single test quickly:
+To run a single test:
 
 ```sh
 pytest ../triton-riscv/python/examples/test_vec_add.py -v
 ```
 
----
+## FAQ
 
-### 1. Stand-Alone
-The middle layer can be used as a stand-alone component to convert Triton dialect to the middle layer dialects. This is intended for testing and validation purposes, but could potentially be used before sending the IR to another MLIR complier.
+Building on RISC-V often runs into dependency issues; we're happy to help if you run into trouble.
 
-Stand-alone example:
-```
-triton-shared-opt --triton-to-linalg %file
-```
+### Fortran library mismatch when building PyTorch
 
-### 2. Backend Component
-The intended use of the Triton middle layer is to be used as a component in a Triton back-end. This can be accomplished by adding the cmake targets it produces and its headers files to that back-end. An example back-end will be published at a later date.
-
-### 3. Reference CPU backend
-We also include an experimental reference CPU backend that leverages all existing `mlir` passes. After building, the CPU backend can be used by setting `triton`'s active driver:
-
-```python
-
-import triton
-from triton.backends.triton_shared.driver import CPUDriver
-
-triton.runtime.driver.set_active(CPUDriver())
-```
-
-For more examples, please refer to `python/examples`.
-
-## Implementation details
-
-Even though a valid triton program can perform load and store in arbitrary memory locations, the prototype only supports lowering programs that have structured memory access patterns.
-
-### Analyses
-
-As part of the conversion process, there are three important analyses:
-
-1. Pointer analysis:
-    + This analysis is responsible for extracting structured memory access patterns from a `triton` program during load and store; it walks the IR and visits relevant instructions to build strided memory accesses in the `memref` dialect. The analysis is still in its early stage and does not support all scenarios.
-
-2. Use analysis:
-    + After "Pointer analysis", instructions that are part of memory address calculation will no longer be necessary in a triton program because their semantics have now been captured by `memref` operations representing strided memory accesses. To aid with removing these instructions safely, we perform `Use analysis` to mark which instructions are used *only* in address calculation (called `MetaUse`) or used in *both* address calculation and data manipulation (called `MixedUse`) operations. Those that are `MixedUse` are cloned and have their users adjusted accordingly with the goal of separating out the `MetaUse` ops so that they can be safely deleted.
-
-3. Mask analysis:
-    + This analysis is responsible for handling masked loads and stores.
-
-### Conversion strategy
-
-We introduce the `TritonToLinalg` pass that converts the `triton` dialect to the `linalg` dialect on *tensors*. This means the resulting IR is fully compatible with `linalg` tiling and fusion transformation passes. As mentioned in the `Pointer analysis`'s description, we do however have to deal with memref instructions at the load and store boundaries and have to convert them to tensors using `bufferization.to_tensor`. Here's a simple example of what the IR looks like:
-
-```mlir
-tt.func @kernel(%afloat : !tt.ptr<bf16>, %res : !tt.ptr<bf16>) {
-  %0 = tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32>
-  %1 = tt.splat %afloat : (!tt.ptr<bf16>) -> tensor<128x!tt.ptr<bf16>>
-  %2 = tt.addptr %1, %0 : tensor<128x!tt.ptr<bf16>>, tensor<128xi32>
-  %afm = tt.load %2 : tensor<128x!tt.ptr<bf16>>
-  %3 = "tt.reduce"(%afm) ({
-  ^bb0(%arg5: bf16, %arg6: bf16):
-    %21 = arith.addf %arg5, %arg6 : bf16
-    tt.reduce.return %21 : bf16
-  }) {axis = 0 : i32} : (tensor<128xbf16>) -> bf16
-  tt.store %res, %3 : !tt.ptr<bf16>
-  tt.return
-}
-```
-
-after conversion:
-
-```mlir
-func.func @kernel(%arg0: memref<*xbf16>, %arg1: memref<*xbf16>, %arg2: i32, %arg3: i32, %arg4: i32) {
-    %cst = arith.constant 0.000000e+00 : f32
-    %reinterpret_cast = memref.reinterpret_cast %arg0 to offset: [0], sizes: [128], strides: [1] :
-        memref<*xbf16> to memref<128xbf16, strided<[1]>>
-    %alloc = memref.alloc() : memref<128xbf16>
-    memref.copy %reinterpret_cast, %alloc : memref<128xbf16, strided<[1]>> to memref<128xbf16>
-    %0 = bufferization.to_tensor %alloc restrict writable : memref<128xbf16>
-    %1 = bufferization.alloc_tensor() : tensor<f32>
-    %inserted = tensor.insert %cst into %1[] : tensor<f32>
-    %reduced = linalg.reduce ins(%0 : tensor<128xbf16>) outs(%inserted : tensor<f32>) dimensions = [0]
-      (%in: bf16, %init: f32) {
-        %3 = arith.extf %in : bf16 to f32
-        %4 = arith.addf %3, %init : f32
-        linalg.yield %4 : f32
-      }
-    %extracted = tensor.extract %reduced[] : tensor<f32>
-    %2 = arith.truncf %extracted : f32 to bf16
-    %reinterpret_cast_0 = memref.reinterpret_cast %arg1 to offset: [0], sizes: [1], strides: [1] :
-        memref<*xbf16> to memref<1xbf16, strided<[1]>>
-    affine.store %2, %reinterpret_cast_0[0] : memref<1xbf16, strided<[1]>>
-    return
-
-}
-```
-
-Important details to note:
-
-+ `tt.load` (together with all of its related address calculation instructions such as `tt.addptr` and `tt.splat`) are lowered to a combination of `memref.reinterpret_cast`, `memref.alloc`, and `memref.copy`. After the initialization of the local buffer, we convert the memref back to a tensor using `bufferization.to_tensor`; this op is automatically removed during bufferization.
-
-+ `tt.store` lowers to a combination of `memref.reinterpret_cast` and either `affine.store` or `memref.tensor_store`:
-
-```
-%reinterpret_cast = memref.reinterpret_cast %arg2 to offset: [...] memref<*xf32> to memref<1024xf32>
-%extracted_slice = tensor.extract_slice %15[0] [%21] [1] : tensor<1024xf32> to tensor<?xf32>
-%subview = memref.subview %reinterpret_cast[0] [%21] [1] : memref<1024xf32> to memref<?xf32>
-bufferization.materialize_in_destination %extracted_slice in writable %subview
-```
-
-+ element-wise `arith` and `math` operators are converted to their corresponding `linalg.generic` version.
-+ `tt.dot` becomes `linalg.matmul`.
-+ `tt.reduce` becomes `linalg.reduce`; known limitation: only support `addf` and `maxf` reduction in the reduction body for now.
-
-### Testing
-
-The prototype was tested on the following triton kernel examples:
-
-1. [vector addition](./python/examples/test_vec_add.py)
-2. [fused softmax](./python/examples/test_softmax.py)
-3. [matrix multiplication](./python/examples/test_matmul.py)
-4. layer normalization
-5. fused attention
-
-The Python tests are setup to run with Pytest and you will need to set the following environment variables to run them:
-```
-export LLVM_BINARY_DIR=<path-to-your-llvm-binaries>
-export TRITON_SHARED_OPT_PATH=$TRITON_PLUGIN_DIRS/triton/build/<your-cmake-directory>/third_party/triton_shared/tools/triton-shared-opt/triton-shared-opt
-
-pytest <path-to-triton-shared>/python/examples
-```
-In addition to testing on the tutorial kernels, there are many lit tests covering various scenarios.
-
-## Intermediate Representation (IR) Dumps
-
-To facilitate debugging and analysis, the triton-shared project now supports emitting all intermediate representations (IRs) generated during the compilation process. This functionality is controlled via the environment variable `TRITON_SHARED_DUMP_PATH`.
-
-### How It Works
-
-By setting the `TRITON_SHARED_DUMP_PATH` environment variable, you specify a directory where all intermediate representations will be saved. The Triton compiler will emit IR dumps at various stages of compilation into the specified folder, allowing developers to inspect and analyze the transformations applied to the code.
-
-### How to Use
-
-Create a directory where the IR dumps will be stored (e.g., /path/to/dump_dir).
-Set the `TRITON_SHARED_DUMP_PATH` environment variable to the directory path:
-`export TRITON_SHARED_DUMP_PATH=/path/to/dump_dir`
-Run your Triton compilation as usual. The compiler will emit IR dumps into the specified directory.
-
-### Example
-
-Suppose your dump directory is `/tmp/ir_dumps`. Before running your code, set the environment variable:
+Preload the correct Fortran library by adding the following to your virtualenv’s `activate` script (e.g. `~/triton/.venv/bin/activate`):
 
 ```sh
-export TRITON_SHARED_DUMP_PATH=/tmp/ir_dumps
+export LD_PRELOAD=/usr/lib64/libgfortran.so.5:$LD_PRELOAD
 ```
-
-After the compilation process completes, you can explore the `/tmp/ir_dumps` directory to find all the intermediate representation files.
-
-```sh
-$ ls /tmp/ir_dumps
-ll.ir  ll.mlir  tt.mlir  ttshared.mlir
-```
-
-## Debugging Triton Programs
-Triton-shared includes a build option that enables LLVM-sanitizers - AddressSanitizer (ASan) and ThreadSanitizer (TSan) - to help detect memory safety and concurrency issues in Triton programs. These sanitizers dynamically analyze the program during execution, identifying bugs such as buffer overflows and data races respectively. For more details and setup instructions, refer [here](triton-san/README.md).
-
-## Contributing
-
-This project welcomes contributions and suggestions.  Most contributions require you to agree to a
-Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
-the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
-
-When you submit a pull request, a CLA bot will automatically determine whether you need to provide
-a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions
-provided by the bot. You will only need to do this once across all repos using our CLA.
-
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
-contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
-
-## Trademarks
-
-This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft
-trademarks or logos is subject to and must follow
-[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
-Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
-Any use of third-party trademarks or logos are subject to those third-party's policies.

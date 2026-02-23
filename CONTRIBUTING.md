@@ -1,14 +1,59 @@
-# Contributing
+# Contributing to triton-riscv
 
-This project welcomes contributions and suggestions. Most contributions require you to
-agree to a Contributor License Agreement (CLA) declaring that you have the right to,
-and actually do, grant us the rights to use your contribution. For details, visit
-https://cla.microsoft.com.
+Thank you for your interest in contributing to **triton-riscv**!  
+We welcome contributions from the community, including bug reports, feature requests,
+documentation improvements, and code contributions.
 
-When you submit a pull request, a CLA-bot will automatically determine whether you need
-to provide a CLA and decorate the PR appropriately (e.g., label, comment). Simply follow the
-instructions provided by the bot. You will only need to do this once across all repositories using our CLA.
+This document describes how to get involved and how to contribute effectively.
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/)
-or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+---
+
+## 📌 Code of Conduct
+
+This project follows the **Contributor Covenant Code of Conduct**.  
+By participating in this project, you agree to abide by its terms.
+
+Please be respectful, inclusive, and constructive in all discussions and contributions.
+
+---
+
+## 🧭 Ways to Contribute
+
+You can contribute to triton-riscv in many ways:
+
+- 🐞 Reporting bugs
+- 💡 Proposing new features or design ideas
+- 📝 Improving documentation and tutorials
+- 🔧 Fixing bugs or refactoring code
+- 🚀 Implementing new compiler passes, dialects, or backends
+- 📊 Adding benchmarks, tests, or evaluation scripts
+
+All contributions, big or small, are appreciated.
+
+---
+
+## 📖 Contributor Guide
+
+For a more detailed guide on contributing to triton-riscv, including
+project structure, development workflow, build instructions, and best practices, please
+refer to the official Contributor Guide:
+
+👉 https://ruyiai-stack.github.io/docs.html#contributor-guide
+
+New contributors are **strongly encouraged** to read this guide before making their
+first contribution.
+
+---
+
+## 🎨 Code Style
+
+This project follows a consistent coding style to ensure readability, maintainability,
+and long-term evolution of the codebase.
+
+Before submitting any code changes, please review and follow the official code style
+guidelines:
+
+👉 https://ruyiai-stack.github.io/docs.html#code-style
+
+Pull requests that do not follow the documented code style may be requested to revise
+before being merged.
