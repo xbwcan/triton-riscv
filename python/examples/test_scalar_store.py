@@ -7,7 +7,7 @@ from triton.backends.triton_shared.driver import CPUDriver
 
 
 @triton.jit
-def test_scalar_store(
+def scalar_store_kernel(
     output_ptr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -23,7 +23,7 @@ def test_scalar_store(
 
 def compile():
     src = triton.compiler.ASTSource(
-        fn=test_scalar_store, signature="*fp32", constexprs={"BLOCK_SIZE": 8}
+        fn=scalar_store_kernel, signature="*fp32", constexprs={"BLOCK_SIZE": 8}
     )
     ret = triton.compile(src)
     print(ret.asm["ttir"])
@@ -43,7 +43,7 @@ def test(device):
     print(x)
     print(output)
 
-    test_scalar_store[grid](output, BLOCK_SIZE=BLOCK_SIZE)
+    scalar_store_kernel[grid](output, BLOCK_SIZE=BLOCK_SIZE)
     print("---")
     print(output)
     ans = torch.arange(BLOCK_SIZE, device=device, dtype=torch.float32)

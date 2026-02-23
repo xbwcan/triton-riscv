@@ -44,10 +44,10 @@ def unstructured_mask_2d_kernel(
 
     in_ptrs = in_ptr + offs_m[:, None] * N + offs_n[None, :]
     # dim 0 with unstructured mask.
-    v = tl.load(in_ptrs, mask=mask_m[:, None] and offs_n[None, :] < n, other=-2)
+    v = tl.load(in_ptrs, mask=(mask_m[:, None]) & (offs_n[None, :] < n), other=-2)
     out_ptrs = out_ptr + offs_m[:, None] * N + offs_n[None, :]
     # dim 1 with unstructured mask.
-    tl.store(out_ptrs, v, mask=offs_m[:, None] < m and mask_n[None, :])
+    tl.store(out_ptrs, v, mask=(offs_m[:, None] < m) & (mask_n[None, :]))
 
 
 def test_unstructured_mask_2d(device):
@@ -118,9 +118,9 @@ def unstructured_mask_3d_kernel(
     # dim 1 with unstructured mask.
     v = tl.load(
         in_ptrs,
-        mask=offs_b[:, None, None] < b
-        and mask_m[None, :, None]
-        and offs_n[None, None, :] < n,
+        mask=(offs_b[:, None, None] < b)
+        & (mask_m[None, :, None])
+        & (offs_n[None, None, :] < n),
         other=-2,
     )
     out_ptrs = (
@@ -133,9 +133,9 @@ def unstructured_mask_3d_kernel(
     tl.store(
         out_ptrs,
         v,
-        mask=offs_b[:, None, None] < b
-        and offs_m[None, :, None] < m
-        and mask_n[None, None, :],
+        mask=(offs_b[:, None, None] < b)
+        & (offs_m[None, :, None] < m)
+        & (mask_n[None, None, :]),
     )
 
 
@@ -212,15 +212,15 @@ def unstructured_mask_2d_non_continuous_load_kernel(
     offs_n = tl.arange(0, N)
 
     index_m = tl.load(index_m_ptr + offs_m, mask=offs_m < im, other=0)
-    mask_m_i = index_m < m and offs_m < im
+    mask_m_i = (index_m < m) & (offs_m < im)
 
     # dim 0 with unstructured offset.
     in_ptrs = in_ptr + index_m[:, None] * stride_m + offs_n[None, :] * stride_n
     # dim 0 with unstructured mask.
-    v = tl.load(in_ptrs, mask=mask_m_i[:, None] and offs_n[None, :] < n, other=-2)
+    v = tl.load(in_ptrs, mask=(mask_m_i[:, None]) & (offs_n[None, :] < n), other=-2)
 
     out_ptrs = out_ptr + offs_m[:, None] * stride_m + offs_n[None, :] * stride_n
-    tl.store(out_ptrs, v, mask=offs_m[:, None] < im and offs_n[None, :] < n)
+    tl.store(out_ptrs, v, mask=(offs_m[:, None] < im) & (offs_n[None, :] < n))
 
 
 def test_unstructured_mask_2d_non_continuous_load(device):
@@ -278,14 +278,14 @@ def unstructured_mask_2d_non_continuous_store_kernel(
     offs_n = tl.arange(0, I_N)
 
     index_n = tl.load(index_n_ptr + offs_n, mask=offs_n < n, other=0)
-    mask_n_i = index_n < n and offs_n < i_n
+    mask_n_i = (index_n < n) & (offs_n < i_n)
 
     in_ptrs = in_ptr + offs_m[:, None] * stride_m + offs_n[None, :] * stride_n
-    v = tl.load(in_ptrs, mask=offs_m[:, None] < m and offs_n[None, :] < i_n, other=-2)
+    v = tl.load(in_ptrs, mask=(offs_m[:, None] < m) & (offs_n[None, :] < i_n), other=-2)
     # dim 1 with unstructured offset.
     out_ptrs = out_ptr + offs_m[:, None] * stride_m + index_n[None, :] * stride_n
     # dim 1 with unstructured mask.
-    tl.store(out_ptrs, v, mask=offs_m[:, None] < m and mask_n_i[None, :])
+    tl.store(out_ptrs, v, mask=(offs_m[:, None] < m) & (mask_n_i[None, :]))
 
 
 def test_unstructured_mask_2d_non_continuous_store(device):
@@ -352,7 +352,7 @@ def unstructured_mask_3d_non_continuous_load_kernel(
     offs_b = tl.arange(0, B)
 
     index_m = tl.load(index_m_ptr + offs_m, mask=offs_m < im, other=0)
-    mask_m_i = index_m < m and offs_m < im
+    mask_m_i = (index_m < m) & (offs_m < im)
 
     # dim 1 with unstructured offset.
     in_ptrs = (
@@ -364,9 +364,9 @@ def unstructured_mask_3d_non_continuous_load_kernel(
     # dim 1 with unstructured mask.
     v = tl.load(
         in_ptrs,
-        mask=offs_b[:, None, None] < b
-        and mask_m_i[None, :, None]
-        and offs_n[None, None, :] < n,
+        mask=(offs_b[:, None, None] < b)
+        & (mask_m_i[None, :, None])
+        & (offs_n[None, None, :] < n),
         other=-2,
     )
 
@@ -379,9 +379,9 @@ def unstructured_mask_3d_non_continuous_load_kernel(
     tl.store(
         out_ptrs,
         v,
-        mask=offs_b[:, None, None] < b
-        and offs_m[None, :, None] < im
-        and offs_n[None, None, :] < n,
+        mask=(offs_b[:, None, None] < b)
+        & (offs_m[None, :, None] < im)
+        & (offs_n[None, None, :] < n),
     )
 
 
@@ -470,7 +470,7 @@ def unstructured_mask_3d_non_continuous_store_kernel(
     offs_b = tl.arange(0, B)
 
     index_n = tl.load(index_n_ptr + offs_n, mask=offs_n < n, other=0)
-    mask_n_i = index_n < n and offs_n < i_n
+    mask_n_i = (index_n < n) & (offs_n < i_n)
 
     in_ptrs = (
         in_ptr
@@ -480,9 +480,9 @@ def unstructured_mask_3d_non_continuous_store_kernel(
     )
     v = tl.load(
         in_ptrs,
-        mask=offs_b[:, None, None] < b
-        and offs_m[None, :, None] < m
-        and offs_n[None, None, :] < i_n,
+        mask=(offs_b[:, None, None] < b)
+        & (offs_m[None, :, None] < m)
+        & (offs_n[None, None, :] < i_n),
         other=-2,
     )
 
@@ -497,9 +497,9 @@ def unstructured_mask_3d_non_continuous_store_kernel(
     tl.store(
         out_ptrs,
         v,
-        mask=offs_b[:, None, None] < b
-        and offs_m[None, :, None] < m
-        and mask_n_i[None, None, :],
+        mask=(offs_b[:, None, None] < b)
+        & (offs_m[None, :, None] < m)
+        & (mask_n_i[None, None, :]),
     )
 
 
@@ -586,7 +586,7 @@ def unstructured_mask_and_structured_mask_kernel(
     # dim 0 with unstructured mask.
     v = tl.load(
         in_ptrs,
-        mask=offs_m[:, None] < m and offs_n[None, :] < n and mask_m[:, None],
+        mask=(offs_m[:, None] < m) & (offs_n[None, :] < n) & (mask_m[:, None]),
         other=-2,
     )
     out_ptrs = (
@@ -599,7 +599,7 @@ def unstructured_mask_and_structured_mask_kernel(
     tl.store(
         out_ptrs,
         v,
-        mask=offs_m[:, None] < m and offs_n[None, :] < n and mask_n[None, :],
+        mask=(offs_m[:, None] < m) & (offs_n[None, :] < n) & (mask_n[None, :]),
     )
 
 

@@ -742,8 +742,8 @@ def index_select_3d_mask_kernel(
     input_pointers_0 = input_ptr + input_offsets
     data = tl.load(
         input_pointers_0,
-        mask=m_offsets[:, None, None] < (BLOCK_M // 2)
-        and k_offsets[None, None, :] < (BLOCK_K // 2),
+        mask=(m_offsets[:, None, None] < (BLOCK_M // 2))
+        & (k_offsets[None, None, :] < (BLOCK_K // 2)),
         other=0,
     )
 
@@ -917,8 +917,8 @@ def index_select_3d_dim0_mask_kernel(
     input_pointers_0 = input_ptr + input_offsets
     data = tl.load(
         input_pointers_0,
-        mask=n_offsets[None, :, None] < (BLOCK_N // 2)
-        and k_offsets[None, None, :] < (BLOCK_K // 2),
+        mask=(n_offsets[None, :, None] < (BLOCK_N // 2))
+        & (k_offsets[None, None, :] < (BLOCK_K // 2)),
         other=0,
     )
 
@@ -1091,8 +1091,8 @@ def index_select_3d_dim2_mask_kernel(
     input_pointers_0 = input_ptr + input_offsets
     data = tl.load(
         input_pointers_0,
-        mask=n_offsets[None, :, None] < (BLOCK_N // 2)
-        and m_offsets[:, None, None] < (BLOCK_M // 2),
+        mask=(n_offsets[None, :, None] < (BLOCK_N // 2))
+        & (m_offsets[:, None, None] < (BLOCK_M // 2)),
         other=0,
     )
 
@@ -1646,8 +1646,8 @@ def scatter_3d_mask_kernel(
     tl.store(
         output_ptr + out_offsets,
         data,
-        mask=m_offsets[:, None, None] < (BLOCK_M // 2)
-        and k_offsets[None, None, :] < (BLOCK_K // 2),
+        mask=(m_offsets[:, None, None] < (BLOCK_M // 2))
+        & (k_offsets[None, None, :] < (BLOCK_K // 2)),
     )
 
 
@@ -1826,8 +1826,8 @@ def scatter_3d_dim0_mask_kernel(
     tl.store(
         output_ptr + out_offsets,
         data,
-        mask=n_offsets[None, :, None] < (BLOCK_N // 2)
-        and k_offsets[None, None, :] < (BLOCK_K // 2),
+        mask=(n_offsets[None, :, None] < (BLOCK_N // 2))
+        & (k_offsets[None, None, :] < (BLOCK_K // 2)),
     )
 
 
@@ -2006,8 +2006,8 @@ def scatter_3d_dim2_mask_kernel(
     tl.store(
         output_ptr + out_offsets,
         data,
-        mask=n_offsets[None, :, None] < (BLOCK_N // 2)
-        and m_offsets[:, None, None] < (BLOCK_M // 2),
+        mask=(n_offsets[None, :, None] < (BLOCK_N // 2))
+        & (m_offsets[:, None, None] < (BLOCK_M // 2)),
     )
 
 

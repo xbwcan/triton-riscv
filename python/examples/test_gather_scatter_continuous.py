@@ -314,7 +314,7 @@ def gather_block_ld_mask(
         + offs_4d_w * stride_w
     )
 
-    a = tl.load(in0 + offs, mask=offs_4d_x < 1 and offs_4d_w < 8, other=0)
+    a = tl.load(in0 + offs, mask=(offs_4d_x < 1) & (offs_4d_w < 8), other=0)
     tl.store(out0 + offs, a)
 
 
@@ -372,7 +372,7 @@ def gather_block_st_mask(
     )
 
     a = tl.load(in0 + offs)
-    tl.store(out0 + offs, a, mask=offs_4d_x < 1 and offs_4d_w < 8)
+    tl.store(out0 + offs, a, mask=(offs_4d_x < 1) & (offs_4d_w < 8))
 
 
 def test_gather_block_st_mask(device):
