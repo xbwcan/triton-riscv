@@ -154,6 +154,109 @@ def _optimize_llir(llir: str):
     # We don't apply any optimizations now, but we can add passes if needed.
     return llir
 
+def _ttsharedir_to_vectorir(ttsharedir: str):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ttshared_path = os.path.join(tmpdir, "ttshared.mlir")
+        vector_path = os.path.join(tmpdir, "vector.mlir")
+        Path(ttshared_path).write_text(ttsharedir)
+        buddy_opt_path = _get_buddy_opt_path()
+        subprocess.check_call(
+            [
+                buddy_opt_path,
+                ttshared_path,
+                "--convert-linalg-to-affine-loops",
+                # Note: eliminate-empty-tensors fails when there are multiple func.return ops
+                # in a single kernel which are the results of early returns.
+                # See python/examples/test_early_return.py for examples.
+                # We disable this pass for now since performance on CPU isn't the main
+                # focus at the moment.
+                # "--eliminate-empty-tensors",
+                "--empty-tensor-to-alloc-tensor",
+                "--one-shot-bufferize=allow-return-allocs-from-loops=true",
+                "--matmul-vectorization",
+                # "--lower-affine",
+                # "--convert-linalg-to-loops",
+                # "--expand-strided-metadata",
+                # "--convert-scf-to-cf",
+                # "--convert-arith-to-llvm",
+                # "--convert-math-to-llvm",
+                # "--convert-complex-to-llvm",
+                # "--convert-vector-to-llvm",
+                # "--convert-index-to-llvm",
+                # "--memref-expand",
+                # "--finalize-memref-to-llvm",
+                # "--convert-func-to-llvm",
+                # "--convert-cf-to-llvm",
+                # # Lowering memrefs creates more affine.apply ops.
+                # # Lowering these affine ops again creates further arith ops,
+                # # so we have to run these two passes again here.
+                # "--lower-affine",
+                # "--convert-arith-to-llvm",
+                # # Remove all unrealized casts created
+                # "--reconcile-unrealized-casts",
+                "--mlir-print-debuginfo",
+                "-o",
+                vector_path,
+            ]
+        )
+        _dump_ir_if_needed([ttshared_path, vector_path])
+        return Path(vector_path).read_text()
+
+def _vectorir_to_llir(vectorir: str):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        vector_path = os.path.join(tmpdir, "vector.mlir")
+        llmlir_path = os.path.join(tmpdir, "ll.mlir")
+        llir_path = os.path.join(tmpdir, "ll.ir")
+        Path(vector_path).write_text(vectorir)
+        buddy_opt_path = _get_buddy_opt_path()
+        # TritonShared-MLIR to LLVM-MLIR
+        subprocess.check_call(
+            [
+                buddy_opt_path,
+                vector_path,
+                # "--convert-linalg-to-affine-loops",
+                # Note: eliminate-empty-tensors fails when there are multiple func.return ops
+                # in a single kernel which are the results of early returns.
+                # See python/examples/test_early_return.py for examples.
+                # We disable this pass for now since performance on CPU isn't the main
+                # focus at the moment.
+                # "--eliminate-empty-tensors",
+                # "--empty-tensor-to-alloc-tensor",
+                # "--one-shot-bufferize=allow-return-allocs-from-loops=true",
+                # "--matmul-vectorization",
+                "--lower-affine",
+                "--convert-linalg-to-loops",
+                "--expand-strided-metadata",
+                "--convert-scf-to-cf",
+                "--convert-arith-to-llvm",
+                "--convert-math-to-llvm",
+                "--convert-complex-to-llvm",
+                "--convert-vector-to-llvm",
+                "--convert-index-to-llvm",
+                "--memref-expand",
+                "--finalize-memref-to-llvm",
+                "--convert-func-to-llvm",
+                "--convert-cf-to-llvm",
+                # Lowering memrefs creates more affine.apply ops.
+                # Lowering these affine ops again creates further arith ops,
+                # so we have to run these two passes again here.
+                "--lower-affine",
+                "--convert-arith-to-llvm",
+                # Remove all unrealized casts created
+                "--reconcile-unrealized-casts",
+                "--mlir-print-debuginfo",
+                "-o",
+                llmlir_path,
+            ]
+        )
+
+        # LLVM-MLIR to LLVM-IR
+        mlir_translate_path = _get_llvm_bin_path("mlir-translate")
+        subprocess.check_call(
+            [mlir_translate_path, llmlir_path, "--mlir-to-llvmir", "-o", llir_path]
+        )
+        _dump_ir_if_needed([llmlir_path, llir_path])
+        return Path(llir_path).read_text()
 
 def _llir_to_bin(llir: str, metadata):
     pattern = r"define void @(\w+)\(.+"
@@ -317,10 +420,9 @@ class CPUBackend(BaseBackend):
 
     def add_stages(self, stages, options, language):
         stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
-        stages["ttsharedir"] = lambda src, metadata: _optimize_ttsharedir(
-            _ttir_to_ttsharedir(src)
-        )
-        stages["llir"] = lambda src, metadata: _optimize_llir(_ttsharedir_to_llir(src))
+        stages["ttsharedir"] = lambda src, metadata: _optimize_ttsharedir(_ttir_to_ttsharedir(src))
+        stages["vectorir"] = lambda src, metadata: _ttsharedir_to_vectorir(src)
+        stages["llir"] = lambda src, metadata: _optimize_llir(_vectorir_to_llir(src))
         stages["obj"] = lambda src, metadata: _llir_to_bin(src, metadata)
 
     @functools.lru_cache()
