@@ -151,7 +151,16 @@ def _ttsharedir_to_llir(ttsharedir: str):
 
 
 def _optimize_llir(llir: str):
-    # We don't apply any optimizations now, but we can add passes if needed.
+    # with tempfile.TemporaryDirectory() as tmpdir:
+    #     llir_path = os.path.join(tmpdir, "ll.ir")
+    #     lliropt_path = os.path.join(tmpdir, "llopt.ir")
+    #     Path(llir_path).write_text(llir)
+
+    #     opt_path = _get_llvm_bin_path("opt")
+    #     subprocess.check_call([opt_path, llir_path, "-O2", "-S", "-o", lliropt_path])
+
+    #     _dump_ir_if_needed([lliropt_path])
+    #     return Path(lliropt_path).read_text()
     return llir
 
 def _ttsharedir_to_vectorir(ttsharedir: str):
@@ -164,7 +173,6 @@ def _ttsharedir_to_vectorir(ttsharedir: str):
             [
                 buddy_opt_path,
                 ttshared_path,
-                "--convert-linalg-to-affine-loops",
                 # Note: eliminate-empty-tensors fails when there are multiple func.return ops
                 # in a single kernel which are the results of early returns.
                 # See python/examples/test_early_return.py for examples.
@@ -173,27 +181,9 @@ def _ttsharedir_to_vectorir(ttsharedir: str):
                 # "--eliminate-empty-tensors",
                 "--empty-tensor-to-alloc-tensor",
                 "--one-shot-bufferize=allow-return-allocs-from-loops=true",
-                "--matmul-vectorization",
-                # "--lower-affine",
-                # "--convert-linalg-to-loops",
-                # "--expand-strided-metadata",
-                # "--convert-scf-to-cf",
-                # "--convert-arith-to-llvm",
-                # "--convert-math-to-llvm",
-                # "--convert-complex-to-llvm",
-                # "--convert-vector-to-llvm",
-                # "--convert-index-to-llvm",
-                # "--memref-expand",
-                # "--finalize-memref-to-llvm",
-                # "--convert-func-to-llvm",
-                # "--convert-cf-to-llvm",
-                # # Lowering memrefs creates more affine.apply ops.
-                # # Lowering these affine ops again creates further arith ops,
-                # # so we have to run these two passes again here.
-                # "--lower-affine",
-                # "--convert-arith-to-llvm",
-                # # Remove all unrealized casts created
-                # "--reconcile-unrealized-casts",
+                "--lower-linalg-to-vir",
+                "--lower-vir-to-vector=vector-width=4",
+                "--convert-linalg-to-affine-loops",
                 "--mlir-print-debuginfo",
                 "-o",
                 vector_path,
