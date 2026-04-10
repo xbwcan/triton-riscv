@@ -85,6 +85,7 @@ def _ttir_to_ttsharedir(mod):
             subprocess_args.insert(2, "--add-llvm-debug-info")
 
         subprocess.check_call(subprocess_args)
+        _dump_ir_if_needed([dst_path])
         return Path(dst_path).read_text()
 
 
@@ -189,7 +190,7 @@ def _ttsharedir_to_vectorir(ttsharedir: str):
                 vector_path,
             ]
         )
-        _dump_ir_if_needed([ttshared_path, vector_path])
+        _dump_ir_if_needed([vector_path])
         return Path(vector_path).read_text()
 
 def _vectorir_to_llir(vectorir: str):
@@ -217,11 +218,13 @@ def _vectorir_to_llir(vectorir: str):
                 "--lower-affine",
                 "--convert-linalg-to-loops",
                 "--expand-strided-metadata",
+                "--convert-vector-to-scf",
+                "--convert-vector-to-llvm=vector-transpose-lowering=eltwise",
+                "--convert-ub-to-llvm",
                 "--convert-scf-to-cf",
                 "--convert-arith-to-llvm",
                 "--convert-math-to-llvm",
                 "--convert-complex-to-llvm",
-                "--convert-vector-to-llvm",
                 "--convert-index-to-llvm",
                 "--memref-expand",
                 "--finalize-memref-to-llvm",
