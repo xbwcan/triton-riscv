@@ -218,6 +218,7 @@ def _vectorir_to_llir(vectorir: str):
                 "--lower-affine",
                 "--convert-linalg-to-loops",
                 "--expand-strided-metadata",
+                "--convert-vector-to-llvm=vector-transpose-lowering=eltwise",
                 "--convert-vector-to-scf",
                 "--convert-vector-to-llvm=vector-transpose-lowering=eltwise",
                 "--convert-ub-to-llvm",
