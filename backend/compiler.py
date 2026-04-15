@@ -47,6 +47,23 @@ def _dump_ir_if_needed(files):
             shutil.copy(f, os.path.join(path, os.path.basename(f)))
 
 
+def _dump_text_if_needed(filename: str, text: str):
+    path = os.getenv("TRITON_SHARED_DUMP_PATH", "")
+    if not path:
+        return
+    os.makedirs(path, exist_ok=True)
+    Path(os.path.join(path, filename)).write_text(text)
+
+
+def _get_lowering_mode() -> str:
+    mode = os.getenv("TRITON_RISCV_LOWERING_MODE", "vir_vector").strip().lower()
+    if mode not in ("vir_vector", "linalg_loops"):
+        raise Exception(
+            "TRITON_RISCV_LOWERING_MODE must be one of: vir_vector, linalg_loops"
+        )
+    return mode
+
+
 def _get_sanitizer_type():
     # returns "" if not set
     # throws error if set to something other than "asan" or "tsan"
@@ -59,6 +76,86 @@ def _get_sanitizer_type():
     return sanitizer_type
 
 
+def _get_llvm_opt_level() -> int:
+    level_str = os.getenv("TRITON_RISCV_LLVM_OPT_LEVEL", "2").strip()
+    try:
+        level = int(level_str)
+    except ValueError:
+        raise Exception(
+            f"TRITON_RISCV_LLVM_OPT_LEVEL={level_str} is invalid, expected 0/1/2/3."
+        )
+    if level not in (0, 1, 2, 3):
+        raise Exception(
+            f"TRITON_RISCV_LLVM_OPT_LEVEL={level_str} is invalid, expected 0/1/2/3."
+        )
+    return level
+
+
+def _get_structured_ldst_mode() -> str:
+    mode = os.getenv(
+        "TRITON_RISCV_STRUCTURED_LDST_MODE", "legacy_memref_bridge"
+    ).strip()
+    if mode not in ("legacy_memref_bridge", "tensor_first_vector_cpu"):
+        raise Exception(
+            "TRITON_RISCV_STRUCTURED_LDST_MODE must be one of: "
+            "legacy_memref_bridge, tensor_first_vector_cpu"
+        )
+    return mode
+
+
+def _get_memopt_profile() -> str:
+    profile = os.getenv("TRITON_RISCV_MEMOPT_PROFILE", "none").strip().lower()
+    if profile not in ("none", "stack", "stack_copy"):
+        raise Exception(
+            "TRITON_RISCV_MEMOPT_PROFILE must be one of: none, stack, stack_copy"
+        )
+    return profile
+
+
+def _get_memopt_stack_max_alloc_bytes() -> int:
+    value = os.getenv("TRITON_RISCV_MEMOPT_STACK_MAX_ALLOC_BYTES", "65536").strip()
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise Exception(
+            "TRITON_RISCV_MEMOPT_STACK_MAX_ALLOC_BYTES must be a positive integer."
+        )
+    if parsed <= 0:
+        raise Exception(
+            "TRITON_RISCV_MEMOPT_STACK_MAX_ALLOC_BYTES must be a positive integer."
+        )
+    return parsed
+
+
+def _get_memopt_stack_max_rank() -> int:
+    value = os.getenv("TRITON_RISCV_MEMOPT_STACK_MAX_RANK", "4").strip()
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise Exception("TRITON_RISCV_MEMOPT_STACK_MAX_RANK must be an integer >= 0.")
+    if parsed < 0:
+        raise Exception("TRITON_RISCV_MEMOPT_STACK_MAX_RANK must be an integer >= 0.")
+    return parsed
+
+
+def _get_vector_width() -> int:
+    value = os.getenv("TRITON_RISCV_VECTOR_WIDTH", "16").strip()
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise Exception("TRITON_RISCV_VECTOR_WIDTH must be a positive integer.")
+    if parsed <= 0:
+        raise Exception("TRITON_RISCV_VECTOR_WIDTH must be a positive integer.")
+    return parsed
+
+
+def _get_vector_to_scf_mode() -> str:
+    mode = os.getenv("TRITON_RISCV_VECTOR_TO_SCF", "on").strip().lower()
+    if mode not in ("on", "off"):
+        raise Exception("TRITON_RISCV_VECTOR_TO_SCF must be one of: on, off")
+    return mode
+
+
 def _ttir_to_ttsharedir(mod):
     # Get Triton-MLIR as string
     ttir_code = str(mod)
@@ -69,10 +166,18 @@ def _ttir_to_ttsharedir(mod):
         _dump_ir_if_needed([src_path])
         triton_shared_opt_path = _get_triton_shared_opt_path()
 
+        structured_ldst_mode = _get_structured_ldst_mode()
+        triton_to_linalg_pass = "--triton-to-linalg-experimental"
+        if structured_ldst_mode == "tensor_first_vector_cpu":
+            triton_to_linalg_pass = (
+                "--triton-to-linalg-experimental="
+                "structured-ldst-mode=tensor-first-vector-cpu"
+            )
+
         subprocess_args = [
             triton_shared_opt_path,
             src_path,
-            "--triton-to-linalg-experimental",
+            triton_to_linalg_pass,
             "--mlir-print-debuginfo",
             "-o",
             dst_path,
@@ -100,24 +205,40 @@ def _ttsharedir_to_llir(ttsharedir: str):
         llir_path = os.path.join(tmpdir, "ll.ir")
         Path(ttshared_path).write_text(ttsharedir)
         buddy_opt_path = _get_buddy_opt_path()
-        # TritonShared-MLIR -> Linalg -> VIR -> Vector -> LLVM-MLIR
-        # Keep this pass order aligned with ../Makefile (MATMUL_PIPELINE).
-        subprocess.check_call(
-            [
-                buddy_opt_path,
-                ttshared_path,
-                # Note: eliminate-empty-tensors fails when there are multiple func.return ops
-                # in a single kernel which are the results of early returns.
-                # See python/examples/test_early_return.py for examples.
-                # We disable this pass for now since performance on CPU isn't the main
-                # focus at the moment.
-                # "--eliminate-empty-tensors",
-                "--empty-tensor-to-alloc-tensor",
-                "--one-shot-bufferize=allow-return-allocs-from-loops=true",
-                "--lower-linalg-to-vir",
-                "--lower-vir-to-vector=vector-width=4",
+        lowering_mode = _get_lowering_mode()
+        common_prefix = [
+            # Note: eliminate-empty-tensors fails when there are multiple func.return ops
+            # in a single kernel which are the results of early returns.
+            # See python/examples/test_early_return.py for examples.
+            # We disable this pass for now since performance on CPU isn't the main
+            # focus at the moment.
+            # "--eliminate-empty-tensors",
+            "--empty-tensor-to-alloc-tensor",
+            "--one-shot-bufferize=allow-return-allocs-from-loops=true",
+        ]
+        memopt_profile = _get_memopt_profile()
+        if memopt_profile in ("stack", "stack_copy"):
+            common_prefix.append(
+                "--promote-buffers-to-stack="
+                f"max-alloc-size-in-bytes={_get_memopt_stack_max_alloc_bytes()} "
+                f"max-rank-of-allocated-memref={_get_memopt_stack_max_rank()}"
+            )
+        if memopt_profile == "stack_copy":
+            common_prefix += [
+                "--convert-bufferization-to-memref",
+                "--fold-memref-alias-ops",
+                "--eliminate-memref-copy",
+                "--canonicalize",
                 "--cse",
-                "--convert-vector-to-scf",
+            ]
+        if lowering_mode == "vir_vector":
+            vector_width = _get_vector_width()
+            vector_to_scf_mode = _get_vector_to_scf_mode()
+            # Keep this order aligned with ../Makefile (MATMUL_PIPELINE).
+            lowering_passes = [
+                "--lower-linalg-to-vir",
+                f"--lower-vir-to-vector=vector-width={vector_width}",
+                "--cse",
                 "--expand-strided-metadata",
                 "--lower-affine",
                 "--convert-scf-to-cf",
@@ -125,15 +246,55 @@ def _ttsharedir_to_llir(ttsharedir: str):
                 "--convert-vector-to-llvm",
                 "--convert-arith-to-llvm",
                 "--convert-math-to-llvm",
+                "--convert-complex-to-llvm",
+                "--convert-index-to-llvm",
+                "--memref-expand",
                 "--finalize-memref-to-llvm",
                 "--convert-func-to-llvm",
-                # Remove all unrealized casts created
+                "--lower-affine",
+                "--convert-arith-to-llvm",
                 "--reconcile-unrealized-casts",
-                "--mlir-print-debuginfo",
-                "-o",
-                llmlir_path,
             ]
+            if vector_to_scf_mode == "on":
+                lowering_passes.insert(3, "--convert-vector-to-scf")
+        else:
+            lowering_passes = [
+                "--convert-linalg-to-affine-loops",
+                "--lower-affine",
+                "--convert-linalg-to-loops",
+                "--expand-strided-metadata",
+                "--convert-scf-to-cf",
+                "--convert-cf-to-llvm",
+                "--convert-vector-to-llvm",
+                "--convert-arith-to-llvm",
+                "--convert-math-to-llvm",
+                "--convert-complex-to-llvm",
+                "--convert-index-to-llvm",
+                "--memref-expand",
+                "--finalize-memref-to-llvm",
+                "--convert-func-to-llvm",
+                "--lower-affine",
+                "--convert-arith-to-llvm",
+                "--reconcile-unrealized-casts",
+            ]
+
+        buddy_opt_args = (
+            [buddy_opt_path, ttshared_path]
+            + common_prefix
+            + lowering_passes
+            + ["--mlir-print-debuginfo", "-o", llmlir_path]
         )
+        _dump_text_if_needed(
+            "buddy-opt.args.txt",
+            "mode="
+            + lowering_mode
+            + "\nmemopt_profile="
+            + memopt_profile
+            + "\n"
+            + " ".join(buddy_opt_args[2:])
+            + "\n",
+        )
+        subprocess.check_call(buddy_opt_args)
 
         # LLVM-MLIR to LLVM-IR
         mlir_translate_path = _get_llvm_bin_path("mlir-translate")
@@ -145,8 +306,27 @@ def _ttsharedir_to_llir(ttsharedir: str):
 
 
 def _optimize_llir(llir: str):
-    # We don't apply any optimizations now, but we can add passes if needed.
-    return llir
+    opt_level = _get_llvm_opt_level()
+    if opt_level == 0:
+        return llir
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src_path = os.path.join(tmpdir, "kernel.ll")
+        dst_path = os.path.join(tmpdir, "kernel.opt.ll")
+        Path(src_path).write_text(llir)
+        opt_path = _get_llvm_bin_path("opt")
+        # Use the new pass manager default pipeline at requested level.
+        subprocess.check_call(
+            [
+                opt_path,
+                f"-passes=default<O{opt_level}>",
+                "-S",
+                src_path,
+                "-o",
+                dst_path,
+            ]
+        )
+        return Path(dst_path).read_text()
 
 
 def _llir_to_bin(llir: str, metadata):
@@ -193,8 +373,10 @@ def _llir_to_bin(llir: str, metadata):
 
             # compile to object file
             clang_path = _get_llvm_bin_path("clang++")
+            opt_level = _get_llvm_opt_level()
 
             subprocess_args = [clang_path, "-c", instrumented_src_path, "-o", dst_path]
+            subprocess_args.append(f"-O{opt_level}")
 
             if sanitizer_type == "asan":
                 subprocess_args.extend(
@@ -206,11 +388,13 @@ def _llir_to_bin(llir: str, metadata):
             subprocess.check_call(subprocess_args)
         else:
             llc_path = _get_llvm_bin_path("llc")
+            opt_level = _get_llvm_opt_level()
             llc_args = [
                 llc_path,
                 src_path,
                 "-filetype=obj",
                 "-relocation-model=pic",
+                f"-O{opt_level}",
                 "-o",
                 dst_path,
             ]
