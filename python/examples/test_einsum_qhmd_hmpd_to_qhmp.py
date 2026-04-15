@@ -2,6 +2,7 @@ import torch
 
 import triton
 import triton.language as tl
+from triton.backends.triton_shared.driver import CPUDriver
 
 
 # This implements einsum(qhmd,hmpd->qhmp).
@@ -27,73 +28,48 @@ def einsum_qhmd_hmpd_to_qhmp_kernel(
     strideCh,
     strideCm,
     strideCp,
-    BLOCK_QHM: tl.constexpr,
     BLOCK_P: tl.constexpr,
 ):
     """
     Triton kernel computing:
        C[q,h,m,p] = sum_{d=0..D-1} A[q,h,m,d] * B[h,m,p,d].
 
-    We tile over Q*H*M in one dimension (BLOCK_QHM), and P in another (BLOCK_P).
-    Then unroll a for-loop over d in [0..D-1], with a mask to guard against invalid indices loads.
+    We tile over P only. Each program instance computes one (q, h, m) row
+    and a vector block along p.
     """
 
-    pid_qhm = tl.program_id(axis=0)  # which block for Q*H*M
-    pid_p = tl.program_id(axis=1)  # which block for P
-
-    # Indices for qhm, p
-    qhm_off = pid_qhm * BLOCK_QHM
-    qhm_idx = qhm_off + tl.arange(0, BLOCK_QHM)  # [BLOCK_QHM]
-
-    p_off = pid_p * BLOCK_P
-    p_idx = p_off + tl.arange(0, BLOCK_P)  # [BLOCK_P]
-
-    # Valid ranges
-    valid_qhm = qhm_idx < (Q * H * M)
+    pid_qhm = tl.program_id(axis=0)
+    pid_p = tl.program_id(axis=1)
+    p_idx = pid_p * BLOCK_P + tl.arange(0, BLOCK_P)
+    valid_qhm = pid_qhm < (Q * H * M)
     valid_p = p_idx < P
 
-    # Expand to 2D for final store
-    qhm_mask_2d = tl.broadcast_to(valid_qhm[:, None], [BLOCK_QHM, BLOCK_P])
-    p_mask_2d = tl.broadcast_to(valid_p[None, :], [BLOCK_QHM, BLOCK_P])
-    full_mask = qhm_mask_2d & p_mask_2d
-
     # Decompose qhm = q * (H * M) + h * M + m -> (q, h, m)
-    q_ = qhm_idx // (H * M)
-    hm_ = qhm_idx % (H * M)
+    q_ = pid_qhm // (H * M)
+    hm_ = pid_qhm % (H * M)
     h_ = hm_ // M
     m_ = hm_ % M
 
-    # Accumulator
-    c_acc = tl.zeros((BLOCK_QHM, BLOCK_P), dtype=tl.float32)
+    baseA = q_ * strideAq + h_ * strideAh + m_ * strideAm
+    baseB = h_ * strideBh + m_ * strideBm
+    baseC = q_ * strideCq + h_ * strideCh + m_ * strideCm
 
+    c_acc = tl.zeros((BLOCK_P,), dtype=tl.float32)
     for d_idx in range(D):
-        # offset in A => q_*strideAq + h_*strideAh + m_*strideAm + d_idx*strideAd
-        baseA = (q_ * strideAq) + (h_ * strideAh) + (m_ * strideAm)
-        A_offset = baseA + d_idx * strideAd
-        # shape => [BLOCK_QHM]
-        # Expand to 2D for masked load
-        A_mask = valid_qhm  # shape [BLOCK_QHM]
-        A_vals = tl.load(A_ptr + A_offset, mask=A_mask, other=0.0)
+        a_val = tl.load(A_ptr + baseA + d_idx * strideAd, mask=valid_qhm, other=0.0)
+        b_ptrs = B_ptr + baseB + d_idx * strideBd + p_idx * strideBp
+        b_vals = tl.load(b_ptrs, mask=valid_p, other=0.0)
+        c_acc += a_val * b_vals
 
-        # offset in B => h_*strideBh + m_*strideBm + d_idx*strideBd + p_idx*strideBp
-        baseB = (h_ * strideBh) + (m_ * strideBm) + (d_idx * strideBd)
-        B_offset = baseB[:, None] + (p_idx[None, :] * strideBp)
-        B_mask_2d = qhm_mask_2d & p_mask_2d
-        B_vals = tl.load(B_ptr + B_offset, mask=B_mask_2d, other=0.0)
-
-        # multiply-accumulate
-        # Expand A_vals to [BLOCK_QHM, 1]
-        # A_vals shape [BLOCK_QHM], B_vals shape [BLOCK_QHM,BLOCK_P]
-        a_col_2d = A_vals[:, None]
-        c_acc += a_col_2d * B_vals
-
-    # Store result
-    baseC = (q_ * strideCq) + (h_ * strideCh) + (m_ * strideCm)
-    c_offset = baseC[:, None] + (p_idx[None, :] * strideCp)
-    tl.store(C_ptr + c_offset, c_acc, mask=full_mask)
+    c_ptrs = C_ptr + baseC + p_idx * strideCp
+    tl.store(c_ptrs, c_acc, mask=valid_qhm & valid_p)
 
 
-def einsum_qhmd_hmpd_to_qhmp(A, B, BLOCK_QHM=2, BLOCK_P=2):
+def select_cpu_backend_compat():
+    triton.runtime.driver.set_active(CPUDriver())
+
+
+def einsum_qhmd_hmpd_to_qhmp(A, B, BLOCK_QHM=None, BLOCK_P=2):
     """
     A: [Q,H,M,D], B: [H,M,P,D]
     => C: [Q,H,M,P] with sum_{d=0..D-1} A[q,h,m,d]*B[h,m,p,d].
@@ -108,7 +84,11 @@ def einsum_qhmd_hmpd_to_qhmp(A, B, BLOCK_QHM=2, BLOCK_P=2):
 
     C = torch.empty((Q, H, M, P), device=A.device, dtype=A.dtype)
 
-    grid = (triton.cdiv(Q * H * M, BLOCK_QHM), triton.cdiv(P, BLOCK_P))
+    # Keep BLOCK_QHM for compatibility with older callers. The current kernel
+    # lowers one (q, h, m) row per program instance, so BLOCK_QHM is ignored.
+    _ = BLOCK_QHM
+
+    grid = (Q * H * M, triton.cdiv(P, BLOCK_P))
 
     einsum_qhmd_hmpd_to_qhmp_kernel[grid](
         A,
@@ -131,7 +111,6 @@ def einsum_qhmd_hmpd_to_qhmp(A, B, BLOCK_QHM=2, BLOCK_P=2):
         C.stride(1),
         C.stride(2),
         C.stride(3),
-        BLOCK_QHM,
         BLOCK_P,
     )
 
