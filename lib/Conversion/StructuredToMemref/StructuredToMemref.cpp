@@ -383,6 +383,121 @@ static FailureOr<Value> materializeStructuredTPtrMemRef(tts::MakeTensorPtrOp op,
       .getResult();
 }
 
+static FailureOr<Value> materializeSplitTPtrMemRef(tts::MakeTensorPtrOp op,
+                                                   Location loc,
+                                                   OpBuilder &rewriter) {
+  if (!op.isSplitPtr()) {
+    return failure();
+  }
+
+  Value base = op.getBase();
+  auto elementType = getElementTypeStructuredPtr(op);
+  if (!isa<MemRefType, UnrankedMemRefType>(base.getType())) {
+    if (!isa<triton::PointerType>(base.getType())) {
+      return failure();
+    }
+    auto unrankedType = UnrankedMemRefType::get(elementType, 0);
+    base = rewriter
+               .create<UnrealizedConversionCastOp>(loc, unrankedType, base)
+               .getResult(0);
+  }
+
+  auto resultShape = cast<RankedTensorType>(op.getType()).getShape();
+  if (resultShape.size() != 2) {
+    return failure();
+  }
+
+  auto resultType = getResultMemrefType(
+      op, /*offset=*/ShapedType::kDynamic,
+      SmallVector<int64_t>(resultShape.size(), ShapedType::kDynamic),
+      SmallVector<int64_t>{ShapedType::kDynamic, ShapedType::kDynamic});
+  auto targetOffset =
+      ofrToIndexValue(accumulateTargetOffset(loc, op.getMixedOffsets(), rewriter),
+                      loc, rewriter);
+  auto parentShape = op.getStaticShape();
+
+  auto isSplitDimension = [](int64_t dim) {
+    return dim == ShapedType::kDynamic || dim != 0;
+  };
+
+  SmallVector<Value> strideVals =
+      ofrsToIndexValues(getMixedStridesForMemref(op, rewriter), loc, rewriter);
+  Value rowSize = rewriter.create<arith::ConstantOp>(
+      loc, rewriter.getIndexAttr(op.getSizes()[0]));
+  Value colSize = rewriter.create<arith::ConstantOp>(
+      loc, rewriter.getIndexAttr(op.getSizes()[1]));
+
+  SmallVector<Value> casts;
+  StringRef wrapType;
+  if (isSplitDimension(parentShape[0])) {
+    Value strideRow = ofrToIndexValue(op.getMixedStrides()[0], loc, rewriter);
+    Value strideCol = ofrToIndexValue(op.getMixedStrides()[1], loc, rewriter);
+    Value modRow = ofrToIndexValue(op.getMixedShape()[0], loc, rewriter);
+
+    Value wrappedAroundOff =
+        rewriter.create<arith::RemSIOp>(loc, targetOffset, strideRow);
+    Value clampedOff =
+        rewriter.create<arith::AddIOp>(loc, modRow, wrappedAroundOff);
+    Value d1 = rewriter.create<arith::SubIOp>(loc, clampedOff, targetOffset);
+    d1 = rewriter.create<arith::DivSIOp>(loc, d1, strideRow);
+    d1 = rewriter.create<arith::MinSIOp>(loc, d1, rowSize);
+    Value d2 = rewriter.create<arith::SubIOp>(loc, rowSize, d1);
+
+    casts.push_back(rewriter
+                        .create<memref::ReinterpretCastOp>(
+                            loc, resultType, base, targetOffset,
+                            ValueRange{d1, colSize},
+                            ValueRange{strideRow, strideCol})
+                        .getResult());
+    casts.push_back(rewriter
+                        .create<memref::ReinterpretCastOp>(
+                            loc, resultType, base, wrappedAroundOff,
+                            ValueRange{d2, colSize},
+                            ValueRange{strideRow, strideCol})
+                        .getResult());
+    wrapType = WRAP_STACKED;
+  } else if (isSplitDimension(parentShape[1])) {
+    Value modN = ofrToIndexValue(op.getMixedShape()[1], loc, rewriter);
+    Value x = rewriter.create<arith::RemSIOp>(loc, targetOffset, modN);
+    Value y = rewriter.create<arith::SubIOp>(loc, targetOffset, x);
+    Value nextOffset = rewriter.create<arith::AddIOp>(loc, x, colSize);
+    Value clampedOffset =
+        rewriter.create<arith::MinSIOp>(loc, nextOffset, modN);
+    Value d1 = rewriter.create<arith::SubIOp>(loc, clampedOffset, x);
+    Value d2 = rewriter.create<arith::SubIOp>(loc, colSize, d1);
+
+    casts.push_back(rewriter
+                        .create<memref::ReinterpretCastOp>(
+                            loc, resultType, base, targetOffset,
+                            ValueRange{rowSize, d1}, strideVals)
+                        .getResult());
+    casts.push_back(rewriter
+                        .create<memref::ReinterpretCastOp>(
+                            loc, resultType, base, y, ValueRange{rowSize, d2},
+                            strideVals)
+                        .getResult());
+    wrapType = WRAP_SIDE_BY_SIDE;
+  } else {
+    return failure();
+  }
+
+  auto combinedCast = rewriter.create<UnrealizedConversionCastOp>(
+      loc, op.getType(), casts);
+  combinedCast->setAttr(wrapType, rewriter.getUnitAttr());
+  return combinedCast.getResult(0);
+}
+
+static UnrealizedConversionCastOp getWraparoundCast(Value ptr) {
+  auto castOp = ptr.getDefiningOp<UnrealizedConversionCastOp>();
+  if (!castOp) {
+    return nullptr;
+  }
+  if (!castOp->hasAttr(WRAP_SIDE_BY_SIDE) && !castOp->hasAttr(WRAP_STACKED)) {
+    return nullptr;
+  }
+  return castOp;
+}
+
 static Value rewriteGatherScatterPtrElement(
     ArrayRef<int64_t> resultShape, tts::MakeGatherScatterTensorPtrOp op,
     Value basePtr, Value gatherOffsetElt, int gatherDim,
@@ -1171,28 +1286,26 @@ private:
     auto loc = op->getLoc();
     auto tensorType = cast<RankedTensorType>(op.getType());
     int64_t rank = tensorType.getRank();
-    if (rank != 1) {
-      return failure();
-    }
     SmallVector<OpFoldResult> mixedDims = op.getMixedMaskDims();
+    SmallVector<OpFoldResult> offsets(rank, rewriter.getIndexAttr(0));
+    SmallVector<OpFoldResult> strides(rank, rewriter.getIndexAttr(1));
 
-    auto alloc = rewriter.create<memref::AllocOp>(
-        loc, MemRefType::get(tensorType.getShape(), tensorType.getElementType()));
+    auto srcSubview = getSubview(rank, mixedDims, ptr, loc, rewriter);
+    auto sliceType = cast<RankedTensorType>(tensor::ExtractSliceOp::inferResultType(
+        tensorType, offsets, mixedDims, strides));
+    Value loadedSlice = createTensorFromMemref(op, srcSubview, sliceType, rewriter);
 
+    auto dynamicResultDims = getDynamicTensorDims(loc, tensorType, ptr, rewriter);
+    Value init = rewriter.create<tensor::EmptyOp>(
+        loc, tensorType.getShape(), tensorType.getElementType(), dynamicResultDims);
     if (Value other = op.getOther()) {
-      fillWithValue(loc, alloc, other, tensorType.getShape(),
-                    std::move(mixedDims),
-                    op.getStaticMaskDims(), rewriter);
+      init = rewriter
+                 .create<linalg::FillOp>(loc, ValueRange{other}, ValueRange{init})
+                 .getResult(0);
     }
 
-    SmallVector<OpFoldResult> copyDims = op.getMixedMaskDims();
-    auto srcSubview = getSubview(rank, copyDims, ptr, loc, rewriter);
-    auto dstSubview = getSubview(rank, copyDims, alloc, loc, rewriter);
-    Value copyLen = ofrToIndexValue(copyDims[0], loc, rewriter);
-    emit1DMemrefToMemrefCopyLoop(loc, srcSubview, dstSubview, copyLen, rewriter);
-
-    Value tensor = rewriter.create<bufferization::ToTensorOp>(
-        loc, tensorType, alloc, true /* restrict */, true /* writable */);
+    Value tensor = rewriter.create<tensor::InsertSliceOp>(
+        loc, loadedSlice, init, offsets, mixedDims, strides);
     rewriter.replaceOp(op, tensor);
     return success();
   }
@@ -1324,6 +1437,42 @@ private:
     return {sv1, sv2};
   }
 
+  std::pair<tensor::ExtractSliceOp, tensor::ExtractSliceOp>
+  getSideBySideSlices(Value source, Value block1, Value block2, Location loc,
+                      ConversionPatternRewriter &rewriter) const {
+    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value rowSize = rewriter.create<tensor::DimOp>(loc, source, 0);
+    Value colSize1 = rewriter.create<memref::DimOp>(loc, block1, 1);
+    Value colSize2 = rewriter.create<memref::DimOp>(loc, block2, 1);
+
+    auto slice1 = rewriter.create<tensor::ExtractSliceOp>(
+        loc, source, ValueRange{c0, c0}, ValueRange{rowSize, colSize1},
+        ValueRange{c1, c1});
+    auto slice2 = rewriter.create<tensor::ExtractSliceOp>(
+        loc, source, ValueRange{c0, colSize1}, ValueRange{rowSize, colSize2},
+        ValueRange{c1, c1});
+    return {slice1, slice2};
+  }
+
+  std::pair<tensor::ExtractSliceOp, tensor::ExtractSliceOp>
+  getStackedSlices(Value source, Value block1, Value block2, Location loc,
+                   ConversionPatternRewriter &rewriter) const {
+    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value rowSize1 = rewriter.create<memref::DimOp>(loc, block1, 0);
+    Value rowSize2 = rewriter.create<memref::DimOp>(loc, block2, 0);
+    Value colSize = rewriter.create<tensor::DimOp>(loc, source, 1);
+
+    auto slice1 = rewriter.create<tensor::ExtractSliceOp>(
+        loc, source, ValueRange{c0, c0}, ValueRange{rowSize1, colSize},
+        ValueRange{c1, c1});
+    auto slice2 = rewriter.create<tensor::ExtractSliceOp>(
+        loc, source, ValueRange{rowSize1, c0}, ValueRange{rowSize2, colSize},
+        ValueRange{c1, c1});
+    return {slice1, slice2};
+  }
+
   LogicalResult rewriteStructuredLoad(tts::LoadOp op, Value ptr,
                                       ConversionPatternRewriter &rewriter) const {
     assert(!op.hasMask());
@@ -1333,6 +1482,29 @@ private:
 
     auto tensorType = cast<RankedTensorType>(op.getType());
     auto elemType = tensorType.getElementType();
+    if (auto unrealizedCast = getWraparoundCast(ptr)) {
+      auto alloc = rewriter.create<memref::AllocOp>(
+          loc, MemRefType::get(tensorType.getShape(), elemType));
+      auto memrefs = unrealizedCast.getOperands();
+      assert(memrefs.size() == 2);
+      auto block1 = memrefs[0];
+      auto block2 = memrefs[1];
+
+      assert(!other && "other value used in non-masked load");
+      if (unrealizedCast->hasAttr(WRAP_SIDE_BY_SIDE)) {
+        createSideBySideCopies(block1, block2, alloc, loc, rewriter);
+      } else if (unrealizedCast->hasAttr(WRAP_STACKED)) {
+        createStackedCopies(block1, block2, alloc, loc, rewriter);
+      } else {
+        llvm_unreachable("unexpected wraparound type");
+      }
+
+      Value tensor = rewriter.create<bufferization::ToTensorOp>(
+          loc, tensorType, alloc, true /* restrict */, true /* writable */);
+      rewriter.replaceOp(op, tensor);
+      return success();
+    }
+
     auto rankedPtr =
         ensureRankedMemRef(ptr, tensorType.getRank(), elemType, loc, rewriter);
     if (failed(rankedPtr)) {
@@ -1347,26 +1519,7 @@ private:
     // No mask
     assert(!other && "other value used in non-masked load");
 
-    auto ptrDefiningOp = ptr.getDefiningOp();
-    if (ptrDefiningOp && (ptrDefiningOp->hasAttr(WRAP_SIDE_BY_SIDE) ||
-                          ptrDefiningOp->hasAttr(WRAP_STACKED))) {
-
-      auto unrealizedCast = cast<UnrealizedConversionCastOp>(ptrDefiningOp);
-      auto memrefs = unrealizedCast.getOperands();
-      assert(memrefs.size() == 2);
-      auto block1 = memrefs[0];
-      auto block2 = memrefs[1];
-
-      if (unrealizedCast->hasAttr(WRAP_SIDE_BY_SIDE)) {
-        createSideBySideCopies(block1, block2, alloc, loc, rewriter);
-      } else if (unrealizedCast->hasAttr(WRAP_STACKED)) {
-        createStackedCopies(block1, block2, alloc, loc, rewriter);
-      } else {
-        llvm_unreachable("unexpected wraparound type");
-      }
-    } else {
-      rewriter.create<memref::CopyOp>(loc, ptr, alloc);
-    }
+    rewriter.create<memref::CopyOp>(loc, ptr, alloc);
 
     Value tensor = rewriter.create<bufferization::ToTensorOp>(
         loc, tensorType, alloc, true /* restrict */, true /* writable */);
@@ -1382,6 +1535,88 @@ private:
     auto loc = op->getLoc();
     auto tensorType = cast<RankedTensorType>(op.getType());
     auto elemType = tensorType.getElementType();
+    if (auto unrealizedCast = getWraparoundCast(ptr)) {
+      auto mixedDims = op.getMixedMaskDims();
+      auto memrefs = unrealizedCast.getOperands();
+      assert(memrefs.size() == 2);
+      auto block1 = memrefs[0];
+      auto block2 = memrefs[1];
+      SmallVector<Value> dynamicResultDims;
+      dynamicResultDims.reserve(tensorType.getNumDynamicDims());
+      Value init = rewriter.create<tensor::EmptyOp>(
+          loc, tensorType.getShape(), elemType, dynamicResultDims);
+      if (Value other = op.getOther()) {
+        init = rewriter
+                   .create<linalg::FillOp>(loc, ValueRange{other}, ValueRange{init})
+                   .getResult(0);
+      }
+      Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+
+      if (unrealizedCast->hasAttr(WRAP_SIDE_BY_SIDE)) {
+        auto [subview1, subview2] =
+            getSideBySideSubviews(mixedDims, block1, block2, loc, rewriter);
+        auto subview1Type = cast<MemRefType>(subview1.getType());
+        auto subview2Type = cast<MemRefType>(subview2.getType());
+        auto slice1Type =
+            RankedTensorType::get(subview1Type.getShape(), elemType);
+        auto slice2Type =
+            RankedTensorType::get(subview2Type.getShape(), elemType);
+        auto genericSliceType =
+            RankedTensorType::get(SmallVector<int64_t>{ShapedType::kDynamic,
+                                                       ShapedType::kDynamic},
+                                  elemType);
+        Value tensor1 = createTensorFromMemref(op, subview1, slice1Type, rewriter);
+        Value tensor2 = createTensorFromMemref(op, subview2, slice2Type, rewriter);
+        tensor1 =
+            rewriter.create<tensor::CastOp>(loc, genericSliceType, tensor1);
+        tensor2 =
+            rewriter.create<tensor::CastOp>(loc, genericSliceType, tensor2);
+        Value rowSize = rewriter.create<memref::DimOp>(loc, subview1, 0);
+        Value colSize1 = rewriter.create<memref::DimOp>(loc, subview1, 1);
+        Value colSize2 = rewriter.create<memref::DimOp>(loc, subview2, 1);
+        init = rewriter.create<tensor::InsertSliceOp>(
+            loc, tensor1, init, ValueRange{c0, c0},
+            ValueRange{rowSize, colSize1}, ValueRange{c1, c1});
+        init = rewriter.create<tensor::InsertSliceOp>(
+            loc, tensor2, init, ValueRange{c0, colSize1},
+            ValueRange{rowSize, colSize2}, ValueRange{c1, c1});
+      } else if (unrealizedCast->hasAttr(WRAP_STACKED)) {
+        auto [subview1, subview2] =
+            getStackedSubviews(mixedDims, block1, block2, loc, rewriter);
+        auto subview1Type = cast<MemRefType>(subview1.getType());
+        auto subview2Type = cast<MemRefType>(subview2.getType());
+        auto slice1Type =
+            RankedTensorType::get(subview1Type.getShape(), elemType);
+        auto slice2Type =
+            RankedTensorType::get(subview2Type.getShape(), elemType);
+        auto genericSliceType =
+            RankedTensorType::get(SmallVector<int64_t>{ShapedType::kDynamic,
+                                                       ShapedType::kDynamic},
+                                  elemType);
+        Value tensor1 = createTensorFromMemref(op, subview1, slice1Type, rewriter);
+        Value tensor2 = createTensorFromMemref(op, subview2, slice2Type, rewriter);
+        tensor1 =
+            rewriter.create<tensor::CastOp>(loc, genericSliceType, tensor1);
+        tensor2 =
+            rewriter.create<tensor::CastOp>(loc, genericSliceType, tensor2);
+        Value rowSize1 = rewriter.create<memref::DimOp>(loc, subview1, 0);
+        Value rowSize2 = rewriter.create<memref::DimOp>(loc, subview2, 0);
+        Value colSize = rewriter.create<memref::DimOp>(loc, subview1, 1);
+        init = rewriter.create<tensor::InsertSliceOp>(
+            loc, tensor1, init, ValueRange{c0, c0},
+            ValueRange{rowSize1, colSize}, ValueRange{c1, c1});
+        init = rewriter.create<tensor::InsertSliceOp>(
+            loc, tensor2, init, ValueRange{rowSize1, c0},
+            ValueRange{rowSize2, colSize}, ValueRange{c1, c1});
+      } else {
+        llvm_unreachable("unexpected wraparound type");
+      }
+
+      rewriter.replaceOp(op, init);
+      return success();
+    }
+
     auto rankedPtr =
         ensureRankedMemRef(ptr, tensorType.getRank(), elemType, loc, rewriter);
     if (failed(rankedPtr)) {
@@ -1401,38 +1636,11 @@ private:
                     op.getMixedMaskDims(), op.getStaticMaskDims(), rewriter);
     }
 
-    auto ptrDefiningOp = ptr.getDefiningOp();
-    if (ptrDefiningOp && (ptrDefiningOp->hasAttr(WRAP_SIDE_BY_SIDE) ||
-                          ptrDefiningOp->hasAttr(WRAP_STACKED))) {
-
-      auto unrealizedCast = cast<UnrealizedConversionCastOp>(ptrDefiningOp);
-
-      auto memrefs = unrealizedCast.getOperands();
-      assert(memrefs.size() == 2);
-      auto block1 = memrefs[0];
-      auto block2 = memrefs[1];
-
-      if (unrealizedCast->hasAttr(WRAP_SIDE_BY_SIDE)) {
-        auto [subview1, subview2] =
-            getSideBySideSubviews(mixedDims, block1, block2, loc, rewriter);
-        createSideBySideCopies(subview1, subview2, alloc, loc, rewriter);
-      } else if (unrealizedCast->hasAttr(WRAP_STACKED)) {
-        auto [subview1, subview2] =
-            getStackedSubviews(mixedDims, block1, block2, loc, rewriter);
-        createStackedCopies(subview1, subview2, alloc, loc, rewriter);
-      } else {
-        llvm_unreachable("unexpected wraparound type");
-      }
-
-      rewriter.eraseOp(unrealizedCast);
-
-    } else {
-      memref::SubViewOp srcSubview =
-          getSubview(tensorType.getRank(), mixedDims, ptr, loc, rewriter);
-      memref::SubViewOp dstSubview =
-          getSubview(tensorType.getRank(), mixedDims, alloc, loc, rewriter);
-      rewriter.create<memref::CopyOp>(loc, srcSubview, dstSubview);
-    }
+    memref::SubViewOp srcSubview =
+        getSubview(tensorType.getRank(), mixedDims, ptr, loc, rewriter);
+    memref::SubViewOp dstSubview =
+        getSubview(tensorType.getRank(), mixedDims, alloc, loc, rewriter);
+    rewriter.create<memref::CopyOp>(loc, srcSubview, dstSubview);
 
     Value tensor = rewriter.create<bufferization::ToTensorOp>(
         loc, tensorType, alloc, true /* restrict */, true /* writable */);
@@ -1599,7 +1807,14 @@ public:
     auto ptr = adaptor.getPtr();
     auto makeTPtr = originalPtr.getDefiningOp<tts::MakeTensorPtrOp>();
     if (!isa<MemRefType, UnrankedMemRefType>(ptr.getType()) && makeTPtr) {
-      auto materialized = materializeStructuredTPtrMemRef(makeTPtr, op.getLoc(), rewriter);
+      FailureOr<Value> materialized = failure();
+      if (makeTPtr.isStructuredPtr()) {
+        materialized = materializeStructuredTPtrMemRef(makeTPtr, op.getLoc(),
+                                                       rewriter);
+      } else if (makeTPtr.isSplitPtr()) {
+        materialized =
+            materializeSplitTPtrMemRef(makeTPtr, op.getLoc(), rewriter);
+      }
       if (failed(materialized)) {
         return rewriter.notifyMatchFailure(
             op, "expected pointer operand to lower from tts.make_tptr");
@@ -1676,13 +1891,16 @@ private:
     assert(op.hasMask());
     auto loc = op->getLoc();
     auto storeTensorType = dyn_cast<RankedTensorType>(stVal.getType());
-    if (!storeTensorType || storeTensorType.getRank() != 1) {
+    if (!storeTensorType) {
       return failure();
     }
-    SmallVector<OpFoldResult> mixedDims = op.getMixedMaskDims();
-    auto dstSubview = getSubview(/*rank=*/1, mixedDims, ptr, loc, rewriter);
-    Value copyLen = ofrToIndexValue(mixedDims[0], loc, rewriter);
-    emit1DTensorToMemrefStoreLoop(loc, stVal, dstSubview, copyLen, rewriter);
+    auto rank = storeTensorType.getRank();
+    auto mixedDims = op.getMixedMaskDims();
+    auto srcSlice = getExtractSlice(rank, mixedDims, stVal, loc, rewriter);
+    auto dstSubview = getSubview(rank, mixedDims, ptr, loc, rewriter);
+    auto storeOp = rewriter.create<bufferization::MaterializeInDestinationOp>(
+        loc, srcSlice, dstSubview);
+    storeOp.setWritable(true);
     rewriter.eraseOp(op);
     return success();
   }
@@ -1701,6 +1919,42 @@ private:
 
     return b.create<tensor::ExtractSliceOp>(loc, dstType, source, offsets, dims,
                                             strides);
+  }
+
+  std::pair<tensor::ExtractSliceOp, tensor::ExtractSliceOp>
+  getSideBySideSlices(Value source, Value block1, Value block2, Location loc,
+                      ConversionPatternRewriter &rewriter) const {
+    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value rowSize = rewriter.create<tensor::DimOp>(loc, source, 0);
+    Value colSize1 = rewriter.create<memref::DimOp>(loc, block1, 1);
+    Value colSize2 = rewriter.create<memref::DimOp>(loc, block2, 1);
+
+    auto slice1 = rewriter.create<tensor::ExtractSliceOp>(
+        loc, source, ValueRange{c0, c0}, ValueRange{rowSize, colSize1},
+        ValueRange{c1, c1});
+    auto slice2 = rewriter.create<tensor::ExtractSliceOp>(
+        loc, source, ValueRange{c0, colSize1}, ValueRange{rowSize, colSize2},
+        ValueRange{c1, c1});
+    return {slice1, slice2};
+  }
+
+  std::pair<tensor::ExtractSliceOp, tensor::ExtractSliceOp>
+  getStackedSlices(Value source, Value block1, Value block2, Location loc,
+                   ConversionPatternRewriter &rewriter) const {
+    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value rowSize1 = rewriter.create<memref::DimOp>(loc, block1, 0);
+    Value rowSize2 = rewriter.create<memref::DimOp>(loc, block2, 0);
+    Value colSize = rewriter.create<tensor::DimOp>(loc, source, 1);
+
+    auto slice1 = rewriter.create<tensor::ExtractSliceOp>(
+        loc, source, ValueRange{c0, c0}, ValueRange{rowSize1, colSize},
+        ValueRange{c1, c1});
+    auto slice2 = rewriter.create<tensor::ExtractSliceOp>(
+        loc, source, ValueRange{rowSize1, c0}, ValueRange{rowSize2, colSize},
+        ValueRange{c1, c1});
+    return {slice1, slice2};
   }
 
   LogicalResult rewriteScatter(tts::MakeGatherScatterTensorPtrOp ptr,
@@ -1849,7 +2103,14 @@ public:
     auto ptr = adaptor.getPtr();
     auto makeTPtr = originalPtr.getDefiningOp<tts::MakeTensorPtrOp>();
     if (!isa<MemRefType, UnrankedMemRefType>(ptr.getType()) && makeTPtr) {
-      auto materialized = materializeStructuredTPtrMemRef(makeTPtr, op.getLoc(), rewriter);
+      FailureOr<Value> materialized = failure();
+      if (makeTPtr.isStructuredPtr()) {
+        materialized = materializeStructuredTPtrMemRef(makeTPtr, op.getLoc(),
+                                                       rewriter);
+      } else if (makeTPtr.isSplitPtr()) {
+        materialized =
+            materializeSplitTPtrMemRef(makeTPtr, op.getLoc(), rewriter);
+      }
       if (failed(materialized)) {
         return rewriter.notifyMatchFailure(
             op, "expected pointer operand to lower from tts.make_tptr");
@@ -1867,6 +2128,46 @@ public:
         rewriter.eraseOp(makeTPtr);
       }
       return res;
+    }
+
+    if (auto unrealizedCast = getWraparoundCast(ptr)) {
+      auto memrefs = unrealizedCast.getOperands();
+      assert(memrefs.size() == 2);
+      auto block1 = memrefs[0];
+      auto block2 = memrefs[1];
+
+      if (op.hasMask()) {
+        return rewriter.notifyMatchFailure(
+            op, "masked split-pointer store is not implemented");
+      }
+
+      if (unrealizedCast->hasAttr(WRAP_SIDE_BY_SIDE)) {
+        auto [slice1, slice2] =
+            getSideBySideSlices(adaptor.getValue(), block1, block2, loc, rewriter);
+        auto store1 = rewriter.create<bufferization::MaterializeInDestinationOp>(
+            loc, slice1, block1);
+        store1.setWritable(true);
+        auto store2 = rewriter.create<bufferization::MaterializeInDestinationOp>(
+            loc, slice2, block2);
+        store2.setWritable(true);
+      } else if (unrealizedCast->hasAttr(WRAP_STACKED)) {
+        auto [slice1, slice2] =
+            getStackedSlices(adaptor.getValue(), block1, block2, loc, rewriter);
+        auto store1 = rewriter.create<bufferization::MaterializeInDestinationOp>(
+            loc, slice1, block1);
+        store1.setWritable(true);
+        auto store2 = rewriter.create<bufferization::MaterializeInDestinationOp>(
+            loc, slice2, block2);
+        store2.setWritable(true);
+      } else {
+        llvm_unreachable("unexpected wraparound type");
+      }
+
+      rewriter.eraseOp(op);
+      if (makeTPtr && makeTPtr->use_empty()) {
+        rewriter.eraseOp(makeTPtr);
+      }
+      return success();
     }
 
     auto storeValue = op.getValue();
