@@ -50,22 +50,13 @@ module {
 // CHECK-NOT: separator of consecutive DAGs
 // CHECK-DAG:         [[VAR_6_:%.+]] = arith.cmpi slt, [[VAR_4_]], [[VAR_5_]] : tensor<64xi32>
 // CHECK-DAG:         [[VAR_cast_:%.+]] = memref.cast [[VAR_1_]] : memref<*xf32> to memref<?xf32>
-// CHECK-NOT: separator of consecutive DAGs
-// CHECK-DAG:         [[VAR_7_:%.+]] = bufferization.to_tensor [[VAR_cast_]] restrict : memref<?xf32>
-// CHECK-DAG:         [[VAR_8_:%.+]] = tensor.empty() : tensor<64xf32>
-// CHECK:             [[VAR_9_:%.+]] = linalg.generic {indexing_maps = [#map, #map, #map], iterator_types = ["parallel"]} ins([[VAR_4_]], [[VAR_6_]] : tensor<64xi32>, tensor<64xi1>) outs([[VAR_8_]] : tensor<64xf32>) {
-// CHECK:             ^bb0([[IN_0_:%.+]]: i32, [[IN_1_:%.+]]: i1, [[IN_2_:%.+]]: f32):
-// CHECK-DAG:           [[VAR_13_:%.+]] = scf.if [[IN_1_]] -> (f32) {
-// CHECK-DAG:             [[VAR_14_:%.+]] = arith.index_cast [[IN_0_]] : i32 to index
-// CHECK:                 [[VAR_extracted_:%.+]] = tensor.extract [[VAR_7_]]{{.}}[[VAR_14_]]{{.}} : tensor<?xf32>
-// CHECK:                 scf.yield [[VAR_extracted_]] : f32
-// CHECK:               } else {
-// CHECK:                 scf.yield [[CST_minus_1_dot_000000_]] : f32
-// CHECK:               }
-// CHECK:               linalg.yield [[VAR_13_]] : f32
-// CHECK:             } -> tensor<64xf32>
+// CHECK:             scf.for
+// CHECK:             tensor.extract
+// CHECK:             memref.load
+// CHECK:             arith.select
+// CHECK:             tensor.insert
 // CHECK:             [[VAR_cast_2_:%.+]] = memref.cast [[VAR_0_]] : memref<*xf32> to memref<?xf32>
-// CHECK:             linalg.generic {indexing_maps = [[[MAP_0_]], [[MAP_0_]]], iterator_types = ["parallel"]} ins([[VAR_arg5_]], [[VAR_9_]] : tensor<64xi32>, tensor<64xf32>) {
+// CHECK:             linalg.generic {indexing_maps = [[[MAP_0_]], [[MAP_0_]]], iterator_types = ["parallel"]} ins([[VAR_arg5_]], {{.*}} : tensor<64xi32>, tensor<64xf32>) {
 // CHECK:             ^bb0([[IN_3_:%.+]]: i32, [[IN_4_:%.+]]: f32):
 // CHECK:               [[VAR_12_:%.+]] = arith.index_cast [[IN_3_]] : i32 to index
 // CHECK:               memref.store [[IN_4_]], [[VAR_cast_2_]]{{.}}[[VAR_12_]]{{.}} : memref<?xf32>

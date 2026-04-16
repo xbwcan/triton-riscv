@@ -194,89 +194,72 @@ struct GatherConverter : public OpConversionPattern<tts::GatherOp> {
                               ptr)
                           .getResult();
 
-    auto baseTensor =
-        rewriter
-            .create<bufferization::ToTensorOp>(
-                loc,
-                RankedTensorType::get(
-                    SmallVector<int64_t>(1, ShapedType::kDynamic),
-                    resultType.getElementType()),
-                baseMemref, true /* restrict */, false /* writable */)
-            .getResult();
-
-    // The linalg.generic op should have the following inputs:
-    // - the offset tensor.
-    // - an optional mask tensor if the gather op contains mask.
-    SmallVector<Value> inputs{offsetTensor};
-
-    if (gatherOp.getMask()) {
-      inputs.push_back(gatherOp.getMask());
+    Value resultTensor =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(),
+                                         resultType.getElementType());
+    SmallVector<Value> loopBounds;
+    loopBounds.reserve(resultType.getRank());
+    for (int64_t i = 0, e = resultType.getRank(); i < e; ++i) {
+      if (resultType.isDynamicDim(i)) {
+        loopBounds.push_back(rewriter.create<tensor::DimOp>(loc, offsetTensor, i));
+      } else {
+        loopBounds.push_back(
+            rewriter.create<arith::ConstantIndexOp>(loc, resultType.getShape()[i]));
+      }
     }
 
-    auto emptyTensor = rewriter
-                           .create<tensor::EmptyOp>(loc, resultType.getShape(),
-                                                    resultType.getElementType())
-                           .getResult();
+    Value fallback = gatherOp.getOther();
+    if (!fallback) {
+      auto elemType = resultType.getElementType();
+      auto zeroAttr = rewriter.getZeroAttr(elemType);
+      assert(zeroAttr && "unexpected element type");
+      fallback = rewriter.create<arith::ConstantOp>(loc, zeroAttr);
+    }
 
-    // Affine maps for the inputs and one additional output.
-    SmallVector<AffineMap> affineMaps(
-        inputs.size() + 1,
-        rewriter.getMultiDimIdentityMap(resultType.getRank()));
+    auto c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    auto c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    auto loop = rewriter.create<scf::ForOp>(loc, c0, loopBounds[0], c1,
+                                            ValueRange{resultTensor});
+    auto buildLoopNest = [&](auto &&self, OpBuilder &b, Location nestedLoc,
+                             int64_t dim, SmallVector<Value> &indices,
+                             Value tensorAcc) -> Value {
+      if (dim == resultType.getRank()) {
+        auto offset =
+            b.create<tensor::ExtractOp>(nestedLoc, offsetTensor, indices);
+        Value index0 =
+            b.create<arith::IndexCastOp>(nestedLoc, b.getIndexType(), offset);
+        Value loadValue =
+            b.create<memref::LoadOp>(nestedLoc, baseMemref, ValueRange{index0});
+        Value value = loadValue;
+        if (gatherOp.getMask()) {
+          Value mask =
+              b.create<tensor::ExtractOp>(nestedLoc, gatherOp.getMask(), indices);
+          value = b.create<arith::SelectOp>(nestedLoc, mask, loadValue, fallback)
+                      .getResult();
+        }
+        return b.create<tensor::InsertOp>(nestedLoc, value, tensorAcc, indices)
+            .getResult();
+      }
 
-    // All iterator types are parallel.
-    SmallVector<utils::IteratorType> iteratorTypes(
-        resultType.getRank(), utils::IteratorType::parallel);
+      auto nestedLoop = b.create<scf::ForOp>(
+          nestedLoc, c0, loopBounds[dim], c1, ValueRange{tensorAcc});
+      auto *body = nestedLoop.getBody();
+      OpBuilder nestedBuilder = OpBuilder::atBlockBegin(body);
+      indices.push_back(nestedLoop.getInductionVar());
+      Value nextTensor = self(self, nestedBuilder, nestedLoc, dim + 1, indices,
+                              nestedLoop.getRegionIterArgs()[0]);
+      indices.pop_back();
+      nestedBuilder.create<scf::YieldOp>(nestedLoc, nextTensor);
+      return nestedLoop.getResult(0);
+    };
 
-    auto genericOp = rewriter.create<linalg::GenericOp>(
-        loc, TypeRange{resultType}, inputs, ValueRange{emptyTensor}, affineMaps,
-        iteratorTypes, [&](OpBuilder &b, Location loc, ValueRange args) {
-          auto getValueAtIndex = [baseTensor](OpBuilder &b, Location loc,
-                                              Value index) -> Value {
-            Value index0 =
-                b.create<arith::IndexCastOp>(loc, b.getIndexType(), index);
+    rewriter.setInsertionPointToStart(loop.getBody());
+    SmallVector<Value> indices{loop.getInductionVar()};
+    Value nextTensor = buildLoopNest(buildLoopNest, rewriter, loc, 1, indices,
+                                     loop.getRegionIterArgs()[0]);
+    rewriter.create<scf::YieldOp>(loc, nextTensor);
 
-            return b.create<tensor::ExtractOp>(loc, baseTensor,
-                                               ValueRange{index0});
-          };
-
-          auto offset = args[0];
-
-          if (!gatherOp.getMask()) {
-            // If there is no mask, simply extract the current element from the
-            // base tensor and use it as the yield value.
-            auto loadValue = getValueAtIndex(b, loc, offset);
-            b.create<linalg::YieldOp>(loc, loadValue);
-          } else {
-            // If the mask value is truthy, the current element is loaded from
-            // the base tensor using its offset. Otherwise, if `other` is
-            // present, yield `other`. If `other` is not present, a default
-            // value of 0 is used.
-            auto mask = args[1];
-            auto ifOp = b.create<scf::IfOp>(
-                loc, mask,
-                [&](OpBuilder &b, Location loc) {
-                  // Truthy case, load from the index.
-                  auto value = getValueAtIndex(b, loc, offset);
-                  b.create<scf::YieldOp>(loc, value);
-                },
-                [&](OpBuilder &b, Location loc) {
-                  // Falsy case, yield `other` or 0 as the default value.
-                  if (gatherOp.getOther()) {
-                    b.create<scf::YieldOp>(loc, gatherOp.getOther());
-                  } else {
-                    auto elemType = resultType.getElementType();
-                    auto zeroAttr = b.getZeroAttr(elemType);
-                    assert(zeroAttr && "unexpected element type");
-                    Value extract = b.create<arith::ConstantOp>(loc, zeroAttr);
-                    b.create<scf::YieldOp>(loc, extract);
-                  }
-                });
-
-            b.create<linalg::YieldOp>(loc, ifOp->getResult(0));
-          }
-        });
-
-    rewriter.replaceOp(gatherOp, genericOp);
+    rewriter.replaceOp(gatherOp, loop.getResult(0));
 
     return success();
   }
@@ -359,14 +342,17 @@ struct ScatterConverter : public OpConversionPattern<tts::ScatterOp> {
             // base memref using its offset.
             storeValueAtIndex(b, loc, offset, value);
           } else {
-            // If the mask value is truthy, insert the current value to the
-            // the base memref using its offset. Otherwise, noop.
+            // Keep the linalg.generic body single-block; mask false preserves
+            // the existing destination value.
             auto mask = args[2];
-            auto ifOp =
-                b.create<scf::IfOp>(loc, mask, [&](OpBuilder &b, Location loc) {
-                  storeValueAtIndex(b, loc, offset, value);
-                  b.create<scf::YieldOp>(loc);
-                });
+            Value index0 =
+                b.create<arith::IndexCastOp>(loc, b.getIndexType(), offset);
+            Value oldValue =
+                b.create<memref::LoadOp>(loc, baseMemref, ValueRange{index0});
+            Value selected =
+                b.create<arith::SelectOp>(loc, mask, value, oldValue);
+            b.create<memref::StoreOp>(loc, selected, baseMemref,
+                                      ValueRange{index0});
           }
 
           b.create<linalg::YieldOp>(loc);
