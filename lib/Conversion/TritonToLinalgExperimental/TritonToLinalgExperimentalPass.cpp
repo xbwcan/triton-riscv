@@ -25,6 +25,7 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
@@ -45,13 +46,26 @@ public:
                     linalg::LinalgDialect, affine::AffineDialect,
                     scf::SCFDialect, tensor::TensorDialect,
                     bufferization::BufferizationDialect, memref::MemRefDialect,
-                    ttx::TritonTilingExtDialect, tts::TritonStructuredDialect,
-                    tptr::TPtrDialect, ptr::PtrDialect>();
+                    vector::VectorDialect, ttx::TritonTilingExtDialect,
+                    tts::TritonStructuredDialect, tptr::TPtrDialect,
+                    ptr::PtrDialect>();
   }
 
   void runOnOperation() override {
     auto moduleOp = getOperation();
     PassManager pm(&getContext(), moduleOp.getOperationName());
+    bool enableTensorFirstVectorCpu = false;
+    if (structuredLdstMode == "legacy_memref_bridge") {
+      enableTensorFirstVectorCpu = false;
+    } else if (structuredLdstMode == "tensor-first-vector-cpu") {
+      enableTensorFirstVectorCpu = true;
+    } else {
+      moduleOp.emitError()
+          << "invalid structured-ldst-mode: " << structuredLdstMode
+          << ". Expected one of: legacy_memref_bridge, tensor-first-vector-cpu";
+      signalPassFailure();
+      return;
+    }
 
     pm.addPass(createTritonToStructuredPass(enableMakeGatherScatterTensorPtr));
 
@@ -62,7 +76,7 @@ public:
     pm.addPass(createTritonToUnstructuredPass());
     pm.addPass(createTritonArithToLinalgPass(/*tensorPtrToLinalg=*/true));
 
-    pm.addPass(createStructuredToMemrefPass());
+    pm.addPass(createStructuredToMemrefPass(enableTensorFirstVectorCpu));
     pm.addPass(createUnstructuredToMemrefPass());
     pm.addPass(createTritonPtrToMemrefPass());
     pm.addPass(createTritonToPtrPass());
