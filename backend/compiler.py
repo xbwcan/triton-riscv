@@ -553,6 +553,7 @@ def _ttsharedir_to_vectorir(ttsharedir: str):
                 "--buffer-deallocation-pipeline",
                 "--lower-linalg-to-vir",
                 "--lower-vir-to-vector=vector-width=16",
+                "--canonicalize",
                 "--cse",
                 "--mlir-print-debuginfo",
                 "-o",
@@ -581,6 +582,7 @@ def _vectorir_to_llir(vectorir: str):
                 vector_path,
                 *transform_passes,
                 "--canonicalize",
+                "--cse",
                 "--mlir-print-debuginfo",
                 "-o",
                 transformed_vector_path,
@@ -625,6 +627,8 @@ def _vectorir_to_llir(vectorir: str):
                 # so we have to run these two passes again here.
                 "--lower-affine",
                 "--convert-arith-to-llvm",
+                "--canonicalize",
+                "--cse",
                 # Remove all unrealized casts created
                 "--reconcile-unrealized-casts",
                 "--mlir-print-debuginfo",
@@ -894,7 +898,7 @@ class CPUBackend(BaseBackend):
             _ttir_to_ttsharedir(src)
         )
         stages["llir"] = lambda src, metadata: _optimize_llir(
-            _ttsharedir_to_llir(src, options), options
+            _vectorir_to_llir(_ttsharedir_to_vectorir(src)), options
         )
         stages["obj"] = lambda src, metadata: _llir_to_bin(src, metadata, options)
 
