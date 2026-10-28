@@ -178,4 +178,5 @@ def bench_matmul(M, N, K):
 
 if __name__ == "__main__":
     benchmark.select_cpu_backend()
-    bench_matmul(512, 512, 512)
+    for M, N, K in [(512*4, 512*4, 512*4), (1024*4, 1024*4, 1024*4), (2048*4, 2048*4, 2048*4)]:
+        bench_matmul(M, N, K)

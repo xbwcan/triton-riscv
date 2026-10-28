@@ -81,7 +81,7 @@ public:
     // force dimension 0 creates large temporary buffers after bufferization
     // and is particularly costly for CPU row reductions.
     pm.addPass(createTritonArithToLinalgPass(
-        /*tensorPtrToLinalg=*/true, /*transposeReduceToRank0=*/false));
+        /*tensorPtrToLinalg=*/true /*, transposeReduceToRank0=false*/));
 
     pm.addPass(createStructuredToMemrefPass(enableTensorFirstVectorCpu));
     pm.addPass(createUnstructuredToMemrefPass());

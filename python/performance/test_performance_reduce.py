@@ -95,5 +95,5 @@ def bench_reduce(rows, cols):
 
 if __name__ == "__main__":
     benchmark.select_cpu_backend()
-    for rows, cols in [(16 * 16, 16 * 16), (32 * 16, 32 * 16), (64 * 16, 64 * 16)]:
+    for rows, cols in [(1024, 1024), (2048, 2048), (4096, 4096)]:
         bench_reduce(rows, cols)
